@@ -65,7 +65,7 @@ def run_case(model: str, repo: str, prompt: str) -> dict:
     t0 = time.monotonic()
     try:
         p = subprocess.run(
-            [str(MU_BINARY), "ask", "--provider", "ollama", "--model", model,
+            [str(MU_BINARY), "ask", "--bare", "--provider", "ollama", "--model", model,
              "--tools", "read,grep", prompt],
             cwd=repo, capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         out, err, rc = p.stdout.strip(), p.stderr, p.returncode
