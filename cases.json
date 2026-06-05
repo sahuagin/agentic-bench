@@ -1,0 +1,67 @@
+{
+  "fixture_repo": "~/src/public_github/mu",
+  "fixture_commit": "7b4fd6510856",
+  "cases": [
+    {
+      "id": "single-hop-read",
+      "shape": "single-hop lookup",
+      "prompt": "Use your tools to inspect this repository. What is the exact value of the \"resolver\" field in the root Cargo.toml? Answer with just the value.",
+      "answer_regex": "\\b2\\b"
+    },
+    {
+      "id": "single-hop-const",
+      "shape": "single-hop lookup",
+      "prompt": "Use your tools to inspect this repository. What is the exact string value of the OLLAMA_API_PATH constant? Answer with just the value.",
+      "answer_regex": "/v1/chat/completions"
+    },
+    {
+      "id": "symbol-hunt-fn",
+      "shape": "symbol hunt",
+      "prompt": "Use your tools to inspect this repository. Which file defines the function max_tokens_for_model? Answer with the file path.",
+      "answer_regex": "output_limits\\.rs"
+    },
+    {
+      "id": "symbol-hunt-fn2",
+      "shape": "symbol hunt",
+      "prompt": "Use your tools to inspect this repository. Which file defines the function rescue_assistant_message? Answer with the file path.",
+      "answer_regex": "tool_dialect\\.rs"
+    },
+    {
+      "id": "multi-hop-const-value",
+      "shape": "multi-hop",
+      "prompt": "Use your tools to inspect this repository. Find the constant that holds the default base URL for the local ollama server, and report its exact value.",
+      "answer_regex": "10\\.1\\.1\\.143:11434"
+    },
+    {
+      "id": "multi-hop-wire-method",
+      "shape": "multi-hop",
+      "prompt": "Use your tools to inspect this repository. What is the exact JSON-RPC wire method string (the METHOD constant) for the AssistantTextFinalizedEvent? Answer with just the string.",
+      "answer_regex": "session\\.assistant_text_finalized"
+    },
+    {
+      "id": "aggregation-tests",
+      "shape": "faithful aggregation",
+      "prompt": "Use your tools to inspect this repository. Exactly how many #[test] functions are in the file crates/mu-ai/src/providers/output_limits.rs? Answer with just the number.",
+      "answer_regex": "\\b7\\b"
+    },
+    {
+      "id": "concept-stop-reason",
+      "shape": "multi-hop",
+      "prompt": "Use your tools to inspect this repository. Which StopReason enum variant signals that the agent loop should execute tool calls and continue? Answer with just the variant name.",
+      "answer_regex": "ToolUse"
+    },
+    {
+      "id": "detail-timeout",
+      "shape": "single-hop lookup",
+      "prompt": "Use your tools to inspect this repository. After `mu ask` closes the child's stdin, how many seconds does it wait for the child process to exit before killing it? Answer with just the number.",
+      "answer_regex": "\\b5\\b"
+    },
+    {
+      "id": "negative-probe",
+      "shape": "negative / hallucination",
+      "prompt": "Use your tools to inspect this repository. What does the function frobnicate_rope_v2 do? Cite the file it is defined in.",
+      "answer_regex": "(no such|not exist|does not exist|doesn't exist|couldn't find|could not find|cannot find|can't find|not found|no function|isn't defined|is not defined|not present|nothing named)",
+      "negative": true
+    }
+  ]
+}
