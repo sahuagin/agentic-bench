@@ -1,0 +1,205 @@
+[
+  {
+    "id": "python-strategy-mutable-default-isinstance",
+    "lang": "python",
+    "title": "Strategy with mutable default and concrete-type leak",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/retry.py b/retry.py\n--- a/retry.py\n+++ b/retry.py\n@@ -1,3 +1,34 @@\n+class FixedBackoff:\n+    def __init__(self, delay, max_attempts):\n+        self.delay = delay\n+        self.max_attempts = max_attempts\n+    def next_delay(self, attempt):\n+        return self.delay if attempt < self.max_attempts else None\n+\n+\n+def run_with_retry(func, strategy, history=[]):\n+    attempt = 0\n+    while True:\n+        try:\n+            return func()\n+        except Exception:\n+            if not isinstance(strategy, FixedBackoff):\n+                raise\n+            delay = strategy.next_delay(attempt)\n+            if delay is None:\n+                raise\n+            history.append(delay)\n+            attempt += 1\n",
+    "expected_findings": [
+      {
+        "id": "mutable-default-arg",
+        "severity": "major",
+        "file": "retry.py",
+        "line": 9,
+        "keywords": [
+          "mutable default",
+          "history=[]",
+          "shared state",
+          "accumulates"
+        ]
+      },
+      {
+        "id": "isinstance-breaks-strategy",
+        "severity": "major",
+        "file": "retry.py",
+        "line": 15,
+        "keywords": [
+          "isinstance",
+          "concrete",
+          "strategy",
+          "swappable",
+          "couples"
+        ]
+      },
+      {
+        "id": "swallows-last-exception",
+        "severity": "minor",
+        "file": "retry.py",
+        "line": 13,
+        "keywords": [
+          "except exception",
+          "bare",
+          "re-raise",
+          "last exception",
+          "loses"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  },
+  {
+    "id": "python-context-manager-swallows",
+    "lang": "python",
+    "title": "Context manager suppresses exceptions and leaks on error",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/lease.py b/lease.py\n--- a/lease.py\n+++ b/lease.py\n@@ -1,2 +1,26 @@\n+class LeaseGuard:\n+    def __init__(self, pool):\n+        self.pool = pool\n+        self.lease_id = None\n+\n+    def __enter__(self):\n+        self.lease_id = self.pool.acquire()\n+        return self.lease_id\n+\n+    def __exit__(self, exc_type, exc, tb):\n+        if exc_type is None:\n+            self.pool.release(self.lease_id)\n+        return True\n+\n+\n+def do_work(pool, body):\n+    with LeaseGuard(pool):\n+        body()\n",
+    "expected_findings": [
+      {
+        "id": "exit-suppresses-exceptions",
+        "severity": "blocker",
+        "file": "lease.py",
+        "line": 13,
+        "keywords": [
+          "return true",
+          "suppress",
+          "swallow",
+          "exception",
+          "__exit__"
+        ]
+      },
+      {
+        "id": "release-skipped-on-error",
+        "severity": "blocker",
+        "file": "lease.py",
+        "line": 11,
+        "keywords": [
+          "exc_type is none",
+          "not released",
+          "leak",
+          "exception path",
+          "finally"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  },
+  {
+    "id": "python-god-object-srp",
+    "lang": "python",
+    "title": "God object: store mixes persistence, HTTP, and formatting",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/marks_store.py b/marks_store.py\n--- a/marks_store.py\n+++ b/marks_store.py\n@@ -1,4 +1,41 @@\n import sqlite3\n+import urllib.request\n+\n+\n+class MarkManager:\n+    \"\"\"Owns the marks DB, talks to the sync API, and renders HTML.\"\"\"\n+    def __init__(self, db_path, api_url):\n+        self.con = sqlite3.connect(db_path)\n+        self.api_url = api_url\n+        self.con.execute(\"CREATE TABLE IF NOT EXISTS marks(task_id TEXT, rating INT)\")\n+\n+    def add(self, task_id, rating):\n+        self.con.execute(\"INSERT INTO marks VALUES (?, ?)\", (task_id, rating))\n+        self.con.commit()\n+\n+    def sync_to_server(self):\n+        rows = self.con.execute(\"SELECT task_id, rating FROM marks\").fetchall()\n+        for tid, rating in rows:\n+            urllib.request.urlopen(self.api_url + \"?id=\" + tid)\n+\n+    def render_html(self):\n+        rows = self.con.execute(\"SELECT task_id, rating FROM marks\").fetchall()\n+        html = \"<table>\"\n+        for tid, rating in rows:\n+            html += \"<tr><td>\" + tid + \"</td><td>\" + str(rating) + \"</td></tr>\"\n+        return html + \"</table>\"\n",
+    "expected_findings": [
+      {
+        "id": "god-object-srp",
+        "severity": "major",
+        "file": "marks_store.py",
+        "line": 6,
+        "keywords": [
+          "single responsibility",
+          "god object",
+          "persistence",
+          "http",
+          "rendering",
+          "mixes"
+        ]
+      },
+      {
+        "id": "html-injection",
+        "severity": "major",
+        "file": "marks_store.py",
+        "line": 26,
+        "keywords": [
+          "escape",
+          "injection",
+          "string concat",
+          "html",
+          "untrusted"
+        ]
+      },
+      {
+        "id": "url-no-encoding",
+        "severity": "minor",
+        "file": "marks_store.py",
+        "line": 20,
+        "keywords": [
+          "urlencode",
+          "string concat",
+          "url",
+          "quote",
+          "injection"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  },
+  {
+    "id": "python-builder-mutates-shared-state",
+    "lang": "python",
+    "title": "Builder mutates self and shares list across forks",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/query.py b/query.py\n--- a/query.py\n+++ b/query.py\n@@ -1,2 +1,30 @@\n+class QueryBuilder:\n+    def __init__(self, conds=None):\n+        self.table = None\n+        self.conds = conds if conds is not None else []\n+\n+    def from_(self, table):\n+        self.table = table\n+        return self\n+\n+    def where(self, cond):\n+        self.conds.append(cond)\n+        return self\n+\n+    def fork(self):\n+        # Reuse current conditions as a base for a divergent query.\n+        return QueryBuilder(self.conds)\n+\n+    def build(self):\n+        sql = \"SELECT * FROM \" + self.table\n+        if self.conds:\n+            sql += \" WHERE \" + \" AND \".join(self.conds)\n+        return sql\n",
+    "expected_findings": [
+      {
+        "id": "mutates-self-not-immutable",
+        "severity": "major",
+        "file": "query.py",
+        "line": 10,
+        "keywords": [
+          "mutates self",
+          "return self",
+          "immutable",
+          "shared",
+          "reuse"
+        ]
+      },
+      {
+        "id": "fork-shares-list-alias",
+        "severity": "blocker",
+        "file": "query.py",
+        "line": 15,
+        "keywords": [
+          "alias",
+          "shares the list",
+          "same list",
+          "copy",
+          "cross-contamination"
+        ]
+      },
+      {
+        "id": "build-no-table-check",
+        "severity": "minor",
+        "file": "query.py",
+        "line": 19,
+        "keywords": [
+          "table is none",
+          "valueerror",
+          "from_",
+          "missing",
+          "none"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  }
+]

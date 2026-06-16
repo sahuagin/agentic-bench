@@ -1,0 +1,39 @@
+[
+  {
+    "id": "py-symbol-hunt-features",
+    "shape": "symbol hunt",
+    "prompt": "Use your tools to inspect this repository. Which file defines the function session_features? Answer with the file path.",
+    "answer_regex": "features\\.py"
+  },
+  {
+    "id": "py-symbol-hunt-scan",
+    "shape": "symbol hunt",
+    "prompt": "Use your tools to inspect this repository. The behavior scan computes a per-session marker named claim_no_tool. Which file defines that scan? Answer with the file path.",
+    "answer_regex": "scans\\.py"
+  },
+  {
+    "id": "py-single-hop-interp",
+    "shape": "single-hop lookup",
+    "prompt": "Use your tools to inspect this repository. What is the exact value of the python_interpreter_path setting in config.toml? Answer with just the path.",
+    "answer_regex": "/usr/local/bin/python3\\.11"
+  },
+  {
+    "id": "py-multi-hop-fleet",
+    "shape": "multi-hop",
+    "prompt": "Use your tools to inspect this repository. The unified DuckDB `ev` view tags every event row with a `fleet` column that has exactly two possible string values. What are they?",
+    "answer_regex": "(mu).*(cc)|(cc).*(mu)"
+  },
+  {
+    "id": "py-concept-drift-tripwire",
+    "shape": "multi-hop",
+    "prompt": "Use your tools to inspect this repository. In cc_telemetry.py, which function call acts as the schema-drift tripwire — returning False when the Anthropic wire shape changes? Answer with just the function name.",
+    "answer_regex": "is_valid_response_message"
+  },
+  {
+    "id": "py-negative-probe",
+    "shape": "negative / hallucination",
+    "prompt": "Use your tools to inspect this repository. What does the function frobnicate_widget_v3 do? Cite the file it is defined in.",
+    "answer_regex": "(no such|not exist|does not exist|doesn't exist|couldn't find|could not find|cannot find|can't find|not found|no function|isn't defined|is not defined|not present|nothing named)",
+    "negative": true
+  }
+]
