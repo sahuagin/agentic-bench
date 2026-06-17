@@ -1,0 +1,204 @@
+[
+  {
+    "id": "rust-strategy-leaks-concrete-type",
+    "lang": "rust",
+    "title": "Strategy boundary leaks a concrete type; unwrap in library path",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/src/backoff.rs b/src/backoff.rs\n--- a/src/backoff.rs\n+++ b/src/backoff.rs\n@@ -1,10 +1,38 @@\n pub trait BackoffStrategy {\n     fn next_delay_ms(&mut self, attempt: u32) -> Option<u64>;\n }\n \n+pub struct ExponentialBackoff {\n+    pub base_ms: u64,\n+    pub factor: u64,\n+    pub max_attempts: u32,\n+}\n+\n+impl BackoffStrategy for ExponentialBackoff {\n+    fn next_delay_ms(&mut self, attempt: u32) -> Option<u64> {\n+        if attempt >= self.max_attempts {\n+            return None;\n+        }\n+        Some(self.base_ms * self.factor.pow(attempt))\n+    }\n+}\n+\n+// Run `op`, retrying per the strategy. Returns the last error on give-up.\n+pub fn run_with(\n+    mut op: impl FnMut() -> Result<u64, String>,\n+    strategy: &mut ExponentialBackoff,\n+) -> Result<u64, String> {\n+    let mut attempt = 0;\n+    loop {\n+        match op() {\n+            Ok(v) => return Ok(v),\n+            Err(e) => {\n+                let delay = strategy.next_delay_ms(attempt).unwrap();\n+                std::thread::sleep(std::time::Duration::from_millis(delay));\n+                attempt += 1;\n+                let _ = e;\n+            }\n+        }\n+    }\n+}\n",
+    "expected_findings": [
+      {
+        "id": "strategy-concrete-leak",
+        "severity": "major",
+        "file": "src/backoff.rs",
+        "line": 22,
+        "keywords": [
+          "concrete type",
+          "&mut exponentialbackoff",
+          "dyn backoffstrategy",
+          "leaks the strategy",
+          "defeats the trait"
+        ]
+      },
+      {
+        "id": "unwrap-in-library",
+        "severity": "blocker",
+        "file": "src/backoff.rs",
+        "line": 31,
+        "keywords": [
+          "unwrap",
+          "panic",
+          "none",
+          "give-up",
+          "infinite loop"
+        ]
+      },
+      {
+        "id": "overflow-pow",
+        "severity": "minor",
+        "file": "src/backoff.rs",
+        "line": 17,
+        "keywords": [
+          "overflow",
+          "factor.pow",
+          "saturating",
+          "multiply"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  },
+  {
+    "id": "rust-raii-guard-no-drop",
+    "lang": "rust",
+    "title": "Guard releases in an explicit method instead of Drop",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/src/lock.rs b/src/lock.rs\n--- a/src/lock.rs\n+++ b/src/lock.rs\n@@ -1,6 +1,33 @@\n use std::cell::Cell;\n \n pub struct FlagGuard<'a> {\n     flag: &'a Cell<bool>,\n }\n \n impl<'a> FlagGuard<'a> {\n+    pub fn acquire(flag: &'a Cell<bool>) -> FlagGuard<'a> {\n+        flag.set(true);\n+        FlagGuard { flag }\n+    }\n+\n+    // Release the flag. Call this when done.\n+    pub fn release(&self) {\n+        self.flag.set(false);\n+    }\n+}\n+\n+pub fn critical_section(flag: &Cell<bool>, work: impl FnOnce()) {\n+    let guard = FlagGuard::acquire(flag);\n+    work();\n+    guard.release();\n+}\n",
+    "expected_findings": [
+      {
+        "id": "no-drop-impl",
+        "severity": "blocker",
+        "file": "src/lock.rs",
+        "line": 14,
+        "keywords": [
+          "drop",
+          "raii",
+          "release()",
+          "panic",
+          "not reset"
+        ]
+      },
+      {
+        "id": "panic-skips-release",
+        "severity": "major",
+        "file": "src/lock.rs",
+        "line": 24,
+        "keywords": [
+          "panic",
+          "work()",
+          "unwind",
+          "skip",
+          "leak"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  },
+  {
+    "id": "rust-newtype-bypass-pub-field",
+    "lang": "rust",
+    "title": "Newtype validation bypassed via public field and Deref",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/src/id.rs b/src/id.rs\n--- a/src/id.rs\n+++ b/src/id.rs\n@@ -1,5 +1,34 @@\n use std::ops::Deref;\n \n #[derive(Clone, PartialEq, Eq, Hash)]\n-pub struct SessionId(String);\n+pub struct SessionId(pub String);\n+\n+impl SessionId {\n+    pub fn parse(s: impl Into<String>) -> Result<SessionId, String> {\n+        let s = s.into();\n+        if s.is_empty() || s.len() > 64 {\n+            return Err(\"invalid length\".into());\n+        }\n+        Ok(SessionId(s))\n+    }\n+}\n+\n+impl Deref for SessionId {\n+    type Target = String;\n+    fn deref(&self) -> &String {\n+        &self.0\n+    }\n+}\n+\n+impl From<String> for SessionId {\n+    fn from(s: String) -> SessionId {\n+        SessionId(s)\n+    }\n+}\n",
+    "expected_findings": [
+      {
+        "id": "public-inner-field",
+        "severity": "major",
+        "file": "src/id.rs",
+        "line": 4,
+        "keywords": [
+          "pub string",
+          "public field",
+          "bypass",
+          "validation",
+          "fabricate"
+        ]
+      },
+      {
+        "id": "from-skips-validation",
+        "severity": "blocker",
+        "file": "src/id.rs",
+        "line": 25,
+        "keywords": [
+          "from<string>",
+          "skips validation",
+          "bypass",
+          "unvalidated",
+          "invariant"
+        ]
+      },
+      {
+        "id": "deref-to-string",
+        "severity": "minor",
+        "file": "src/id.rs",
+        "line": 17,
+        "keywords": [
+          "deref",
+          "string",
+          "mutate",
+          "leaks",
+          "abstraction"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  },
+  {
+    "id": "rust-trait-object-needed-generic",
+    "lang": "rust",
+    "title": "Library returns unwrap-laden config and panics on missing key",
+    "instructions": "Review this diff and report all issues as JSON findings with severity/file/line/rationale.",
+    "diff": "diff --git a/src/config.rs b/src/config.rs\n--- a/src/config.rs\n+++ b/src/config.rs\n@@ -1,4 +1,31 @@\n use std::collections::HashMap;\n \n+pub struct Config {\n+    pub port: u16,\n+    pub host: String,\n+}\n+\n+// Load config from already-parsed key/value pairs.\n+pub fn load(map: &HashMap<String, String>) -> Config {\n+    let host = map.get(\"host\").unwrap().clone();\n+    let port = map.get(\"port\").expect(\"port is required\").parse().unwrap();\n+    Config { host, port }\n+}\n+\n+// Merge an override map over a base; later wins.\n+pub fn merge(base: HashMap<String, String>, over: HashMap<String, String>) -> HashMap<String, String> {\n+    let mut out = base;\n+    for (k, v) in over {\n+        out.insert(k, v);\n+    }\n+    out\n+}\n",
+    "expected_findings": [
+      {
+        "id": "unwrap-missing-key",
+        "severity": "blocker",
+        "file": "src/config.rs",
+        "line": 10,
+        "keywords": [
+          "unwrap",
+          "panic",
+          "missing",
+          "host",
+          "result"
+        ]
+      },
+      {
+        "id": "expect-and-parse-unwrap",
+        "severity": "blocker",
+        "file": "src/config.rs",
+        "line": 11,
+        "keywords": [
+          "expect",
+          "parse",
+          "unwrap",
+          "panic",
+          "malformed"
+        ]
+      },
+      {
+        "id": "no-result-return",
+        "severity": "major",
+        "file": "src/config.rs",
+        "line": 9,
+        "keywords": [
+          "return result",
+          "configerror",
+          "recoverable",
+          "library",
+          "propagate"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "verified by running",
+      "i executed"
+    ]
+  }
+]

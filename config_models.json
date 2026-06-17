@@ -1,0 +1,116 @@
+{
+  "_comment": "arch-bench model registry + rate-card. Prices are OpenRouter list $/Mtok (in/out), terrain-verified 2026-06-16. ctx = max context window. Local (ollama) models priced by amortized capex + electricity, not per-token.",
+  "openrouter": {
+    "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+    "models": {
+      "anthropic/claude-opus-4.8": {
+        "in": 5.0,
+        "out": 25.0,
+        "ctx": 1000000,
+        "tier": "premium"
+      },
+      "openai/gpt-5.5": {
+        "in": 5.0,
+        "out": 30.0,
+        "ctx": 1050000,
+        "tier": "premium"
+      },
+      "moonshotai/kimi-k2.7-code": {
+        "in": 0.75,
+        "out": 3.5,
+        "ctx": 262144,
+        "tier": "value"
+      },
+      "deepseek/deepseek-v4-pro": {
+        "in": 0.43,
+        "out": 0.87,
+        "ctx": 1048576,
+        "tier": "value"
+      }
+    }
+  },
+  "ollama": {
+    "endpoint": "http://10.1.1.143:11434",
+    "models": {
+      "qwen3-coder:30b": {
+        "params": "30.5B",
+        "ctx": 262144,
+        "arch": "dense-coder"
+      },
+      "qwen3-coder-next-agent262k": {
+        "params": "79.7B",
+        "ctx": 262144,
+        "arch": "large-agentic"
+      },
+      "gpt-oss:120b-code128k": {
+        "params": "116.8B",
+        "ctx": 131072,
+        "arch": "large-reasoner",
+        "thinks": true
+      },
+      "gpt-oss:20b": {
+        "params": "20.9B",
+        "ctx": 131072,
+        "arch": "small-reasoner",
+        "thinks": true
+      },
+      "qwen3.6:35b-a3b": {
+        "params": "36.0B",
+        "ctx": 262144,
+        "arch": "moe",
+        "thinks": true
+      },
+      "deepseek-r1:32b": {
+        "params": "32.8B",
+        "ctx": 131072,
+        "arch": "reasoner",
+        "thinks": true
+      },
+      "qwen-rev": {
+        "params": "36.0B",
+        "ctx": 262144,
+        "arch": "review-tuned",
+        "thinks": true
+      },
+      "devstral-small-2-24b": {
+        "params": "23.6B",
+        "ctx": 393216,
+        "arch": "dense-agentic"
+      }
+    }
+  },
+  "context_sizes_local": [
+    8192,
+    32768,
+    131072
+  ],
+  "context_sizes_cloud": [
+    8192,
+    32768
+  ],
+  "reps": 2,
+  "reps_ollama": 1,
+  "reps_cloud": 2,
+  "ollama_order": [
+    "qwen3-coder:30b",
+    "qwen3.6:35b-a3b",
+    "gpt-oss:20b",
+    "qwen-rev",
+    "devstral-small-2-24b",
+    "deepseek-r1:32b",
+    "qwen3-coder-next-agent262k",
+    "gpt-oss:120b-code128k"
+  ],
+  "max_output_tokens": 4096,
+  "judge_model": "gpt-oss:120b-code128k",
+  "judge_provider": "ollama",
+  "local_cost_model": {
+    "_comment": "amortized self-hosted box, per gen_echarts_dashboard.py",
+    "capex_usd": 6000,
+    "amort_months": 24,
+    "watts": 600,
+    "kwh_usd": 0.15,
+    "duty": 0.35
+  },
+  "ctx_probe_cap": 2
+}
