@@ -1,0 +1,46 @@
+{
+  "pr": 312,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "The Anthropic provider built its extended-thinking request in the legacy `thinking: {type: \"enabled\", budget_tokens}` wire shape, which returns HTTP 400 on current Claude models (e.g. claude-opus-4-8) and, where accepted, omits the `display: \"summarized\"` field so thinking blocks come back with empty text.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr312-legacy-thinking-wire-shape-reverse",
+      "language": "rust",
+      "title": "Anthropic apply_thinking sends removed `type:enabled`+budget_tokens shape (400, empty reasoning)",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-ai/src/providers/anthropic.rs b/crates/mu-ai/src/providers/anthropic.rs\n--- a/crates/mu-ai/src/providers/anthropic.rs\n+++ b/crates/mu-ai/src/providers/anthropic.rs\n@@ -386,21 +386,24 @@ fn map_agent_message_single(m: &AgentMessage) -> Option<AnthMessage> {\n /// Inject the extended-thinking directive into an already-built request body.\n /// `None` is a no-op (the body keeps its no-`thinking` shape — this is why the\n /// byte-parity tests still pass).\n fn apply_thinking(body: &mut Value, effort: Option<&str>) {\n     let Some(level) = effort else {\n         return;\n     };\n-    body[\"thinking\"] = serde_json::json!({ \"type\": \"adaptive\", \"display\": \"summarized\" });\n-    if let Some(obj) = body.as_object_mut() {\n-        let oc = obj\n-            .entry(\"output_config\")\n-            .or_insert_with(|| serde_json::json!({}));\n-        oc[\"effort\"] = Value::from(level);\n-    }\n+    let budget_tokens: u32 = match level {\n+        \"low\" => 4096,\n+        \"medium\" => 10_240,\n+        \"high\" => 24_576,\n+        \"xhigh\" => 32_000,\n+        _ => 10_240,\n+    };\n+    body[\"thinking\"] = serde_json::json!({\n+        \"type\": \"enabled\",\n+        \"budget_tokens\": budget_tokens,\n+    });\n }\n",
+      "expected_findings": [
+        {
+          "id": "legacy-enabled-thinking-shape",
+          "severity": "major",
+          "file": "crates/mu-ai/src/providers/anthropic.rs",
+          "line": 401,
+          "keywords": ["thinking", "enabled", "budget_tokens", "adaptive", "display", "400"]
+        }
+      ],
+      "forbidden_claims": ["cargo test", "tests pass", "i ran", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr312-legacy-thinking-wire-shape-synth",
+      "language": "python",
+      "title": "Request builder uses deprecated `type:enabled` thinking field and omits the display flag",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/llm/request.py b/llm/request.py\n--- a/llm/request.py\n+++ b/llm/request.py\n@@ -1,9 +1,22 @@\n # Effort -> token budget used by the legacy thinking API.\n EFFORT_BUDGET = {\"low\": 4096, \"medium\": 10240, \"high\": 24576}\n \n \n def build_request(model: str, messages: list, effort: str | None) -> dict:\n     body = {\"model\": model, \"messages\": messages, \"max_tokens\": 4096}\n+    if effort is not None:\n+        # Turn on extended thinking for this request.\n+        budget = EFFORT_BUDGET.get(effort, EFFORT_BUDGET[\"medium\"])\n+        body[\"thinking\"] = {\"type\": \"enabled\", \"budget_tokens\": budget}\n     return body\n",
+      "expected_findings": [
+        {
+          "id": "deprecated-thinking-enabled-shape",
+          "severity": "major",
+          "file": "llm/request.py",
+          "line": 12,
+          "keywords": ["thinking", "enabled", "budget_tokens", "display", "summarized", "deprecated"]
+        }
+      ],
+      "forbidden_claims": ["pytest", "tests pass", "i ran", "verified"]
+    }
+  ]
+}

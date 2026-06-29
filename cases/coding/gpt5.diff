@@ -1,0 +1,22 @@
+diff --git a/crates/mu-core/src/route_catalog.rs b/crates/mu-core/src/route_catalog.rs
+index 9b9bfc1..3c24240 100644
+--- a/crates/mu-core/src/route_catalog.rs
++++ b/crates/mu-core/src/route_catalog.rs
+@@ -303,7 +303,7 @@ fn provider_effort_fallback(provider_kind: &str) -> Vec<&'static str> {
+         // `minimal` was dropped — gpt-5.5 rejects it with a 400 (live-verified,
+         // mu-53kt) — and `xhigh` added. Any other codex model sets its own set
+         // via `[models.<label>]` (the slice-2 override path).
+-        "openai_codex" => vec!["low", "medium", "high", "xhigh"],
++        "openai_codex" | "openai_api" => vec!["low", "medium", "high", "xhigh"],
+         // Ollama Anthropic-compat exposes a thinking switch, not effort depth.
+         "ollama" => vec!["off", "on"],
+         _ => Vec::new(),
+@@ -312,7 +312,7 @@ fn provider_effort_fallback(provider_kind: &str) -> Vec<&'static str> {
+ 
+ fn provider_default_effort(provider_kind: &str, levels: &[Arc<str>]) -> Option<Arc<str>> {
+     let preferred = match provider_kind {
+-        "anthropic_api" | "anthropic_oauth" | "openai_codex" => "medium",
++        "anthropic_api" | "anthropic_oauth" | "openai_codex" | "openai_api" => "medium",
+         "ollama" => "on",
+         _ => return None,
+     };

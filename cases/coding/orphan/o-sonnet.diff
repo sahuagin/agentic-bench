@@ -1,0 +1,681 @@
+diff --git a/crates/mu-core/src/context/compaction/heuristic.rs b/crates/mu-core/src/context/compaction/heuristic.rs
+index 73805f4..f8150de 100644
+--- a/crates/mu-core/src/context/compaction/heuristic.rs
++++ b/crates/mu-core/src/context/compaction/heuristic.rs
+@@ -11,11 +11,12 @@
+ //!
+ //! 1. **Stale `FileLoad` spans** — oldest first. v1 proxy: span
+ //!    position (earlier = older). Future: mtime-based staleness.
+-//! 2. **Old `ToolCall`/`ToolResult` clusters** — adjacent runs of
+-//!    tool-call/tool-result spans are dropped as a unit, oldest
+-//!    cluster first. v1 proxy for "paired by `call_id`": the rope
+-//!    layer carries no `call_id` field, so adjacency is the
+-//!    structural pairing rule.
++//! 2. **Old tool exchanges** — each exchange is one `Assistant` span
++//!    plus ALL `ToolResult` spans whose `call_id` that assistant
++//!    emitted. The whole exchange drops as a unit (oldest exchange
++//!    first), enforcing the invariant that no tool_use or tool_result
++//!    is ever left orphaned regardless of fan-out, non-contiguity, or
++//!    reordering of results in the rope.
+ //! 3. **Old `Assistant` turns** — older than the [`KEEP_RECENT_ASSISTANT`]
+ //!    most-recent assistant spans.
+ //! 4. **`SkillActivation`** — oldest first. v1 proxy: in the current
+@@ -51,10 +52,12 @@
+ //! lifetime anyway. A future bead can extend rope.rs with a
+ //! span-filter primitive that preserves provenance.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::time::Instant;
+ 
+ use super::{CompactionDecision, CompactionPolicy, CompactionResult};
++use crate::agent::types::ContentBlock;
++use crate::context::assembly::extract_call_id_from_span_id;
+ use crate::context::rope::{RetainedRope, RetentionClass, Span, SpanKind};
+ 
+ /// Number of most-recent `Assistant` spans preserved across a
+@@ -134,26 +137,79 @@ fn record_drop(
+     });
+ }
+ 
+-/// Group consecutive `ToolCall` / `ToolResult` spans into clusters.
+-/// Each cluster is a `Vec<usize>` of indices in iteration order.
+-fn tool_clusters(spans: &[Span]) -> Vec<Vec<usize>> {
+-    let mut clusters = Vec::new();
+-    let mut i = 0;
+-    while i < spans.len() {
+-        if matches!(spans[i].kind, SpanKind::ToolCall | SpanKind::ToolResult) {
+-            let mut cluster = Vec::new();
+-            while i < spans.len()
+-                && matches!(spans[i].kind, SpanKind::ToolCall | SpanKind::ToolResult)
+-            {
+-                cluster.push(i);
+-                i += 1;
++/// A logical tool exchange: one `Assistant` span (index into the rope)
++/// plus all `ToolResult` span indices whose `call_id` was emitted by
++/// that assistant turn.
++///
++/// The invariant this structure enforces: every member of an exchange
++/// drops together or survives together — no orphaned tool_use or
++/// tool_result halves.
++struct ToolExchange {
++    /// Index of the `Assistant` span that emitted the tool_use blocks.
++    assistant_idx: usize,
++    /// Indices of every `ToolResult` span whose call_id matches one of
++    /// the assistant's `ContentBlock::ToolCall` blocks. Ordered by rope
++    /// position.
++    result_indices: Vec<usize>,
++}
++
++/// Build the set of logical tool exchanges by linking `Assistant` spans
++/// to their `ToolResult` spans via `call_id`.
++///
++/// Replaces the old adjacency-based `tool_clusters` so that fan-out
++/// turns (one assistant, multiple parallel tool calls), non-contiguous
++/// results, and reordered results are all handled correctly.
++fn tool_exchanges(spans: &[Span]) -> Vec<ToolExchange> {
++    // Map call_id → assistant span index (for each assistant that emitted
++    // at least one tool_use block).
++    let mut call_id_to_assistant: HashMap<String, usize> = HashMap::new();
++    for (i, span) in spans.iter().enumerate() {
++        if span.kind != SpanKind::Assistant {
++            continue;
++        }
++        if let Some(blocks) = span.blocks() {
++            for block in blocks {
++                if let ContentBlock::ToolCall(tc) = block {
++                    call_id_to_assistant.insert(tc.id.clone(), i);
++                }
+             }
+-            clusters.push(cluster);
+-        } else {
+-            i += 1;
+         }
+     }
+-    clusters
++
++    if call_id_to_assistant.is_empty() {
++        return Vec::new();
++    }
++
++    // Group ToolResult spans by their call_id back to the assistant.
++    // Key: assistant span index. Value: vec of result span indices.
++    let mut assistant_to_results: HashMap<usize, Vec<usize>> = HashMap::new();
++    for (i, span) in spans.iter().enumerate() {
++        if span.kind != SpanKind::ToolResult {
++            continue;
++        }
++        if let Some(call_id) = extract_call_id_from_span_id(&span.id) {
++            if let Some(&asst_idx) = call_id_to_assistant.get(call_id) {
++                assistant_to_results
++                    .entry(asst_idx)
++                    .or_default()
++                    .push(i);
++            }
++        }
++    }
++
++    // Emit exchanges in rope order (by assistant index).
++    let mut exchanges: Vec<ToolExchange> = assistant_to_results
++        .into_iter()
++        .map(|(assistant_idx, mut result_indices)| {
++            result_indices.sort_unstable();
++            ToolExchange {
++                assistant_idx,
++                result_indices,
++            }
++        })
++        .collect();
++    exchanges.sort_by_key(|e| e.assistant_idx);
++    exchanges
+ }
+ 
+ impl CompactionPolicy for SpanFamilyDropPolicy {
+@@ -221,45 +277,45 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+             }
+         }
+ 
+-        // Tier 2: ToolCall/ToolResult clusters (adjacent), oldest cluster first.
+-        // CRITICAL: also drop the Assistant span immediately preceding each
+-        // cluster — it contains the tool_use block that references the call
+-        // IDs in the cluster. Leaving it orphaned produces an invalid
+-        // conversation (model sees tool_use with no matching tool_result).
+-        let clusters = tool_clusters(spans);
+-        for cluster in &clusters {
++        // Tier 2: tool exchanges (assistant + ALL its tool_results), oldest first.
++        //
++        // Uses call_id linkage rather than adjacency so that fan-out turns
++        // (one assistant emitting multiple parallel tool calls), non-contiguous
++        // results, and reordered results are all handled correctly.
++        //
++        // Invariant: every member of an exchange drops together or not at all —
++        // no orphaned tool_use or tool_result halves.
++        let exchanges = tool_exchanges(spans);
++        for exchange in &exchanges {
+             if tokens_after <= target_tokens {
+                 break;
+             }
+-            // mu-tlri: the assistant+cluster unit drops together or
+-            // not at all — a standing member anywhere in the unit
+-            // (theoretical today; tool spans are Hot) would otherwise
+-            // leave an orphaned tool_use/tool_result pairing.
+-            let preceding_standing = cluster
+-                .first()
+-                .filter(|&&first| first > 0 && spans[first - 1].kind == SpanKind::Assistant)
+-                .is_some_and(|&first| !evictable(&spans[first - 1]));
+-            if preceding_standing || cluster.iter().any(|&idx| !evictable(&spans[idx])) {
++            // mu-tlri: the whole exchange (assistant + all its results) drops
++            // as a unit or not at all. A standing member anywhere in the unit
++            // keeps the whole exchange. Also skip exchanges whose assistant is
++            // in the preserved-recent set — those are not "old" exchanges.
++            let assistant_standing = !evictable(&spans[exchange.assistant_idx]);
++            let assistant_preserved = preserved_assistants.contains(&exchange.assistant_idx);
++            let any_result_standing = exchange
++                .result_indices
++                .iter()
++                .any(|&idx| !evictable(&spans[idx]));
++            if assistant_standing || assistant_preserved || any_result_standing {
+                 continue;
+             }
+-            // Find the Assistant span preceding this cluster.
+-            if let Some(&first_idx) = cluster.first() {
+-                if first_idx > 0 && spans[first_idx - 1].kind == SpanKind::Assistant {
+-                    record_drop(
+-                        first_idx - 1,
+-                        "assistant with orphaned tool_use (evicted with tool cluster)",
+-                        spans,
+-                        &sizes,
+-                        &mut dropped,
+-                        &mut tokens_after,
+-                        &mut decisions,
+-                    );
+-                }
+-            }
+-            for &idx in cluster {
++            record_drop(
++                exchange.assistant_idx,
++                "assistant with orphaned tool_use (evicted with tool exchange)",
++                spans,
++                &sizes,
++                &mut dropped,
++                &mut tokens_after,
++                &mut decisions,
++            );
++            for &idx in &exchange.result_indices {
+                 record_drop(
+                     idx,
+-                    "old tool call/result cluster",
++                    "old tool result (evicted with tool exchange)",
+                     spans,
+                     &sizes,
+                     &mut dropped,
+@@ -270,9 +326,16 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+         }
+ 
+         // Tier 3: old Assistant turns (not in preserved-recent set).
+-        // When dropping an Assistant span that has tool_use content (the
+-        // next span is ToolCall/ToolResult), also drop the tool cluster
+-        // to avoid orphaned tool_results in the conversation.
++        // When the assistant being dropped is part of a tool exchange,
++        // drop all its tool_result spans too — leaving them orphaned
++        // would produce an invalid conversation (tool_result with no
++        // matching tool_use).
++        //
++        // Build a per-assistant-index lookup into the exchanges list so
++        // that tier 3 can find the exchange for any assistant span in O(1).
++        let exchange_by_assistant: HashMap<usize, &ToolExchange> =
++            exchanges.iter().map(|e| (e.assistant_idx, e)).collect();
++
+         for i in 0..n {
+             if tokens_after <= target_tokens {
+                 break;
+@@ -281,34 +344,39 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+                 && !preserved_assistants.contains(&i)
+                 && evictable(&spans[i])
+             {
+-                // mu-tlri: assistant + trailing tool cluster drop as a
+-                // unit or not at all (mirrors tier 2's pairing rule) —
+-                // a standing cluster member would otherwise be
+-                // orphaned by the assistant drop.
+-                let cluster_end = (i + 1..n)
+-                    .take_while(|&j| {
+-                        matches!(spans[j].kind, SpanKind::ToolCall | SpanKind::ToolResult)
+-                    })
+-                    .last()
+-                    .map_or(i, |j| j);
+-                if (i + 1..=cluster_end).any(|j| !evictable(&spans[j])) {
+-                    continue;
+-                }
+-                record_drop(
+-                    i,
+-                    "old assistant turn",
+-                    spans,
+-                    &sizes,
+-                    &mut dropped,
+-                    &mut tokens_after,
+-                    &mut decisions,
+-                );
+-                // Drop trailing tool cluster if present (empty range
+-                // when cluster_end == i, i.e., no trailing cluster).
+-                for j in i + 1..=cluster_end {
++                // mu-tlri: if this assistant has tool_use blocks, its
++                // result spans must drop with it — the whole exchange
++                // drops as a unit or not at all (mirrors tier 2's pairing
++                // rule). A standing result span keeps the whole exchange.
++                if let Some(exchange) = exchange_by_assistant.get(&i) {
++                    if exchange.result_indices.iter().any(|&r| !evictable(&spans[r])) {
++                        continue;
++                    }
++                    record_drop(
++                        i,
++                        "old assistant turn",
++                        spans,
++                        &sizes,
++                        &mut dropped,
++                        &mut tokens_after,
++                        &mut decisions,
++                    );
++                    for &r in &exchange.result_indices {
++                        record_drop(
++                            r,
++                            "tool result orphaned by assistant drop",
++                            spans,
++                            &sizes,
++                            &mut dropped,
++                            &mut tokens_after,
++                            &mut decisions,
++                        );
++                    }
++                } else {
++                    // No tool exchange — plain assistant turn.
+                     record_drop(
+-                        j,
+-                        "tool cluster orphaned by assistant drop",
++                        i,
++                        "old assistant turn",
+                         spans,
+                         &sizes,
+                         &mut dropped,
+@@ -361,12 +429,44 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::agent::types::{ToolArgs, ToolCall};
+     use crate::context::rope::{RetentionClass, Span, SpanKind};
+ 
+     fn span(id: &str, kind: SpanKind, content: &str) -> Span {
+         Span::new(id, kind, content, RetentionClass::Warm)
+     }
+ 
++    /// Build an `Assistant` span with a `ContentBlock::ToolCall` block for
++    /// each supplied call_id, using `call_id` as the tool name and id.
++    /// The `content` is the flat text projection (used for target sizing).
++    fn assistant_with_tool_calls(id: &str, call_ids: &[&str], content: &str) -> Span {
++        let empty_args =
++            ToolArgs::new(serde_json::Value::Object(Default::default())).unwrap();
++        let blocks: Vec<ContentBlock> = call_ids
++            .iter()
++            .map(|&cid| {
++                ContentBlock::ToolCall(ToolCall {
++                    id: cid.to_string(),
++                    name: cid.to_string(),
++                    arguments: empty_args.clone(),
++                })
++            })
++            .collect();
++        Span::new(id, SpanKind::Assistant, content, RetentionClass::Warm)
++            .with_blocks(blocks)
++    }
++
++    /// Build a `ToolResult` span whose id encodes `call_id` in the
++    /// production format `msg-{idx}-tool-result:{call_id}`.
++    fn tool_result(msg_idx: usize, call_id: &str, content: &str) -> Span {
++        Span::new(
++            format!("msg-{msg_idx}-tool-result:{call_id}"),
++            SpanKind::ToolResult,
++            content,
++            RetentionClass::Warm,
++        )
++    }
++
+     fn dropped_ids(result: &CompactionResult) -> Vec<&str> {
+         result
+             .decisions
+@@ -447,13 +547,16 @@ mod tests {
+ 
+     #[test]
+     fn file_loads_dropped_before_tool_results() {
+-        // Two FileLoads + a ToolCall/Result pair. Target = 60% of total →
+-        // forces ~40% drop. FileLoad tier (50% of rope) drains first;
+-        // tool cluster only touched if necessary.
++        // Two FileLoads + a tool exchange. Target = 60% of total →
++        // forces ~40% drop. FileLoad tier drains first;
++        // tool exchange only touched if necessary.
++        //
++        // Uses production-correct span structure: assistant has blocks()
++        // and the tool_result span id encodes the call_id.
+         let rope = RetainedRope::from_spans(vec![
+             span("f1", SpanKind::FileLoad, "0123456789"),
+-            span("tc1", SpanKind::ToolCall, "0123456789"),
+-            span("tr1", SpanKind::ToolResult, "0123456789"),
++            assistant_with_tool_calls("a1", &["call-1"], "0123456789"),
++            tool_result(2, "call-1", "0123456789"),
+             span("f2", SpanKind::FileLoad, "0123456789"),
+         ]);
+         let target = target_from_rope(&rope, 0.6);
+@@ -462,85 +565,128 @@ mod tests {
+         // Both FileLoads should drop before any tool span is touched.
+         assert!(drops.contains(&"f1"), "f1 dropped in tier 1");
+         assert!(drops.contains(&"f2"), "f2 dropped in tier 1");
+-        // Tool cluster preserved (FileLoad drops covered the gap).
++        // Tool exchange preserved (FileLoad drops covered the gap).
+         let survivors = surviving_ids(&r);
+-        assert!(survivors.contains(&"tc1"));
+-        assert!(survivors.contains(&"tr1"));
++        assert!(survivors.contains(&"a1"));
++        assert!(survivors.iter().any(|id| id.contains("call-1")));
+     }
+ 
+     #[test]
+     fn tool_call_and_result_drop_as_a_cluster() {
+-        // Tool cluster preceded by its assistant (which has tool_use).
++        // Tool exchange: assistant with tool_use blocks + matching tool_result.
+         // a2/a3 are the two most recent assistants → preserved.
+         // Target forces eviction through tier 2.
++        //
++        // Uses production-correct span structure: assistant has blocks()
++        // and the tool_result span id encodes the call_id.
+         let rope = RetainedRope::from_spans(vec![
+             span("sys", SpanKind::System, "sys"),
+-            span("a_tooluse", SpanKind::Assistant, "[tool_call:read({})]"),
+-            span("tc1", SpanKind::ToolCall, "0123456789"),
+-            span("tr1", SpanKind::ToolResult, "0123456789"),
++            assistant_with_tool_calls("a_tooluse", &["call-read"], "[tool_call:read({})]"),
++            tool_result(2, "call-read", "0123456789"),
+             span("a2", SpanKind::Assistant, "0123456789"),
+             span("a3", SpanKind::Assistant, "0123456789"),
+         ]);
+         let target = target_from_rope(&rope, 0.6);
+         let r = SpanFamilyDropPolicy::new().compact(&rope, target);
+         let drops = dropped_ids(&r);
+-        assert!(drops.contains(&"tc1"), "tc1 dropped");
+-        assert!(drops.contains(&"tr1"), "tr1 dropped");
++        assert!(
++            drops.iter().any(|id| id.contains("call-read")),
++            "tool_result for call-read dropped; drops={drops:?}"
++        );
+         assert!(
+             drops.contains(&"a_tooluse"),
+-            "assistant with tool_use must be dropped with its cluster"
++            "assistant with tool_use must be dropped with its exchange; drops={drops:?}"
+         );
+         let survivors = surviving_ids(&r);
+         assert_eq!(survivors, vec!["sys", "a2", "a3"]);
+     }
+ 
+     #[test]
+-    fn tool_cluster_drop_never_orphans_assistant_tool_use() {
+-        // Reproducer for the compaction→400 bug: dropping a tool cluster
++    fn tool_exchange_drop_never_orphans_assistant_tool_use() {
++        // Reproducer for the compaction→400 bug: dropping a tool_result
+         // without its assistant leaves an orphaned tool_use block in the
+         // conversation, causing the model to 400 with "No tool output
+         // found for function call."
++        //
++        // Uses production-correct span structure: assistant spans carry
++        // ContentBlock::ToolCall blocks and tool_result span ids encode
++        // the call_id, so the exchange grouping is by call_id not adjacency.
+         let rope = RetainedRope::from_spans(vec![
+             span("sys", SpanKind::System, "system prompt"),
+             span("u1", SpanKind::User, "hello"),
+-            span(
++            assistant_with_tool_calls(
+                 "a1_tools",
+-                SpanKind::Assistant,
++                &["bash-1"],
+                 "[tool_call:bash({cmd:pwd})]",
+             ),
+-            span("tc1", SpanKind::ToolCall, "bash pwd"),
+-            span("tr1", SpanKind::ToolResult, "/home/user"),
++            tool_result(3, "bash-1", "/home/user"),
+             span("a2_text", SpanKind::Assistant, "You are in /home/user"),
+             span("u2", SpanKind::User, "do more stuff"),
+-            span(
++            assistant_with_tool_calls(
+                 "a3_tools",
+-                SpanKind::Assistant,
++                &["read-1"],
+                 "[tool_call:read({path:f})]",
+             ),
+-            span("tc2", SpanKind::ToolCall, "read f"),
+-            span("tr2", SpanKind::ToolResult, "file contents here"),
++            tool_result(7, "read-1", "file contents here"),
+             span("a4_text", SpanKind::Assistant, "The file contains..."),
+         ]);
+         // Aggressive target to force tier 2 drops.
+         let target = target_from_rope(&rope, 0.4);
+         let r = SpanFamilyDropPolicy::new().compact(&rope, target);
+         let survivors = surviving_ids(&r);
+-        // Key invariant: no surviving Assistant span should have a
+-        // tool_use block whose tool cluster was dropped.
+-        for (i, s) in r.rope.spans().iter().enumerate() {
+-            if s.kind == SpanKind::Assistant && s.content().contains("[tool_call:") {
+-                // The next span must be a ToolCall/ToolResult cluster.
+-                let next = r.rope.spans().get(i + 1);
+-                assert!(
+-                    next.is_some_and(|n| matches!(
+-                        n.kind,
+-                        SpanKind::ToolCall | SpanKind::ToolResult
+-                    )),
+-                    "Assistant span {:?} has tool_use but no following tool cluster — \
+-                     this would cause a provider 400 error. Survivors: {:?}",
+-                    s.id(),
+-                    survivors,
+-                );
++        // Key invariant: for every surviving Assistant span that has
++        // ContentBlock::ToolCall blocks, all its tool_results must also
++        // survive (and vice versa — no surviving tool_result without its
++        // assistant).
++        for s in r.rope.spans() {
++            if s.kind == SpanKind::Assistant {
++                if let Some(blocks) = s.blocks() {
++                    let call_ids: Vec<&str> = blocks
++                        .iter()
++                        .filter_map(|b| {
++                            if let ContentBlock::ToolCall(tc) = b {
++                                Some(tc.id.as_str())
++                            } else {
++                                None
++                            }
++                        })
++                        .collect();
++                    for cid in &call_ids {
++                        let result_present = r.rope.spans().iter().any(|rs| {
++                            rs.kind == SpanKind::ToolResult
++                                && extract_call_id_from_span_id(rs.id()) == Some(cid)
++                        });
++                        assert!(
++                            result_present,
++                            "Assistant {:?} has tool_use for call_id {:?} but its \
++                             tool_result was dropped — this would cause a provider 400. \
++                             Survivors: {:?}",
++                            s.id(),
++                            cid,
++                            survivors,
++                        );
++                    }
++                }
++            }
++            if s.kind == SpanKind::ToolResult {
++                if let Some(cid) = extract_call_id_from_span_id(s.id()) {
++                    let assistant_present = r.rope.spans().iter().any(|a| {
++                        a.kind == SpanKind::Assistant
++                            && a.blocks().is_some_and(|bs| {
++                                bs.iter().any(|b| {
++                                    matches!(b, ContentBlock::ToolCall(tc) if tc.id == cid)
++                                })
++                            })
++                    });
++                    assert!(
++                        assistant_present,
++                        "ToolResult {:?} (call_id={:?}) survives but its assistant \
++                         was dropped — orphaned tool_result. Survivors: {:?}",
++                        s.id(),
++                        cid,
++                        survivors,
++                    );
++                }
+             }
+         }
+     }
+@@ -569,14 +715,16 @@ mod tests {
+     #[test]
+     fn drops_recorded_with_specific_reasons() {
+         // One of each droppable kind; tiny target forces multi-tier drops.
+-        // The tool cluster (tc/tr) is preceded by an assistant that acts
+-        // as the tool_use originator. Three more assistants so
+-        // KEEP_RECENT_ASSISTANT=2 preserves a_mid + a_keep.
++        // The tool exchange (a_tool + its tool_result) is dropped as a unit
++        // in tier 2. Three more assistants so KEEP_RECENT_ASSISTANT=2
++        // preserves a_mid + a_keep.
++        //
++        // Uses production-correct span structure: assistant has blocks() and
++        // the tool_result span id encodes the call_id.
+         let rope = RetainedRope::from_spans(vec![
+             span("f", SpanKind::FileLoad, "xxxxx"),
+-            span("a_tool", SpanKind::Assistant, "[tool_call:x({})]"),
+-            span("tc", SpanKind::ToolCall, "xxxxx"),
+-            span("tr", SpanKind::ToolResult, "xxxxx"),
++            assistant_with_tool_calls("a_tool", &["call-x"], "[tool_call:x({})]"),
++            tool_result(2, "call-x", "xxxxx"),
+             span("a_old", SpanKind::Assistant, "xxxxx"),
+             span("a_mid", SpanKind::Assistant, "xxxxx"),
+             span("a_keep", SpanKind::Assistant, "xxxxx"),
+@@ -594,12 +742,20 @@ mod tests {
+             })
+             .collect();
+         let joined = reasons.join("|");
+-        assert!(joined.contains("f=stale file-load"));
+-        assert!(joined.contains("a_tool=assistant with orphaned tool_use"));
+-        assert!(joined.contains("tc=old tool call/result cluster"));
+-        assert!(joined.contains("tr=old tool call/result cluster"));
+-        assert!(joined.contains("a_old=old assistant turn"));
+-        assert!(joined.contains("sk=stale skill activation"));
++        assert!(joined.contains("f=stale file-load"), "joined={joined}");
++        assert!(
++            joined.contains("a_tool=assistant with orphaned tool_use"),
++            "joined={joined}"
++        );
++        assert!(
++            joined.contains("old tool result (evicted with tool exchange)"),
++            "joined={joined}"
++        );
++        assert!(joined.contains("a_old=old assistant turn"), "joined={joined}");
++        assert!(
++            joined.contains("sk=stale skill activation"),
++            "joined={joined}"
++        );
+     }
+ 
+     #[test]
+@@ -777,19 +933,31 @@ mod tests {
+             .all(|d| !matches!(d, CompactionDecision::Dropped { .. })));
+     }
+ 
+-    /// Tier-2/3 pairing: a standing member anywhere in an
+-    /// assistant+cluster unit keeps the WHOLE unit (no orphaned
+-    /// tool_use/tool_result halves).
++    /// Tier-2/3 pairing: a standing member anywhere in a tool exchange
++    /// keeps the WHOLE exchange (no orphaned tool_use/tool_result halves).
++    ///
++    /// Uses production-correct span structure so the exchange is
++    /// established via call_id linkage: the assistant has blocks() with
++    /// a ToolCall block and the tool_result span id encodes the call_id.
+     #[test]
+-    fn standing_cluster_member_keeps_the_whole_unit() {
++    fn standing_exchange_member_keeps_the_whole_unit() {
++        let empty_args =
++            ToolArgs::new(serde_json::Value::Object(Default::default())).unwrap();
++        let a1 = Span::new("a1", SpanKind::Assistant, "calls a tool", RetentionClass::Warm)
++            .with_blocks(vec![ContentBlock::ToolCall(ToolCall {
++                id: "call-pinned".to_string(),
++                name: "read".to_string(),
++                arguments: empty_args,
++            })]);
++        let t1 = Span::new(
++            "msg-1-tool-result:call-pinned",
++            SpanKind::ToolResult,
++            "pinned tool result",
++            RetentionClass::Pinned,
++        );
+         let rope = RetainedRope::from_spans(vec![
+-            span("a1", SpanKind::Assistant, "calls a tool"),
+-            Span::new(
+-                "t1",
+-                SpanKind::ToolResult,
+-                "pinned tool result",
+-                RetentionClass::Pinned,
+-            ),
++            a1,
++            t1,
+             span("u1", SpanKind::User, "hi"),
+             span("a2", SpanKind::Assistant, "x"),
+             span("a3", SpanKind::Assistant, "y"),
+@@ -798,8 +966,55 @@ mod tests {
+         let result = SpanFamilyDropPolicy::new().compact(&rope, 1);
+         let survivors: Vec<&str> = result.rope.spans().iter().map(|s| s.id()).collect();
+         assert!(
+-            survivors.contains(&"a1") && survivors.contains(&"t1"),
+-            "assistant+cluster unit with a standing member survives intact; got {survivors:?}"
++            survivors.contains(&"a1") && survivors.iter().any(|id| id.contains("call-pinned")),
++            "tool exchange with a standing member survives intact; got {survivors:?}"
++        );
++    }
++
++    /// Fan-out tool call: one assistant emits multiple parallel tool calls
++    /// whose results are non-contiguous in the rope. Compaction must drop
++    /// ALL result spans together with the assistant — never leave any part
++    /// of the exchange orphaned.
++    ///
++    /// This is the core scenario the call_id-based exchange grouping fixes:
++    /// adjacency-based clustering would only catch the first consecutive run
++    /// and could leave non-contiguous results or partial exchanges behind.
++    #[test]
++    fn fanout_tool_calls_drop_as_one_exchange() {
++        // One assistant fans out two tool calls; their results are separated
++        // by a User turn (non-contiguous). Both a2/a3 are preserved.
++        let rope = RetainedRope::from_spans(vec![
++            span("sys", SpanKind::System, "system"),
++            assistant_with_tool_calls(
++                "a_fan",
++                &["call-bash", "call-read"],
++                "[tool_call:bash(...)][tool_call:read(...)]",
++            ),
++            tool_result(2, "call-bash", "bash output here"),
++            span("u_intermediate", SpanKind::User, "intermediate"),
++            tool_result(4, "call-read", "read output here"),
++            span("a2", SpanKind::Assistant, "done with both"),
++            span("a3", SpanKind::Assistant, "final answer"),
++        ]);
++        // Force tier 2 drops.
++        let target = target_from_rope(&rope, 0.5);
++        let r = SpanFamilyDropPolicy::new().compact(&rope, target);
++        let drops = dropped_ids(&r);
++        let survivors = surviving_ids(&r);
++        // Either the whole exchange drops (a_fan + both results) or none of it does.
++        let assistant_dropped = drops.contains(&"a_fan");
++        let bash_dropped = drops.iter().any(|id| id.contains("call-bash"));
++        let read_dropped = drops.iter().any(|id| id.contains("call-read"));
++        assert_eq!(
++            assistant_dropped, bash_dropped,
++            "a_fan and call-bash must drop together; drops={drops:?}"
++        );
++        assert_eq!(
++            assistant_dropped, read_dropped,
++            "a_fan and call-read must drop together; drops={drops:?}"
+         );
++        // a2/a3 always survive.
++        assert!(survivors.contains(&"a2"), "a2 must survive; survivors={survivors:?}");
++        assert!(survivors.contains(&"a3"), "a3 must survive; survivors={survivors:?}");
+     }
+ }

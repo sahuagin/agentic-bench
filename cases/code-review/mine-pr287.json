@@ -1,0 +1,46 @@
+{
+  "pr": 287,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "bash",
+  "bug_summary": "The CI reviewer unconditionally targets the configured ollama MODEL with no pre-flight on what is actually resident, so when a different model is loaded it forces an eviction + multi-minute cold load that SIGTERMs in-flight reviewers, and there is no hosted fallback.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr287-ollama-preflight-reverse",
+      "language": "bash",
+      "title": "ai-review.sh drops the /api/ps pre-flight and blindly targets the configured ollama model",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/scripts/ai-review.sh b/scripts/ai-review.sh\n--- a/scripts/ai-review.sh\n+++ b/scripts/ai-review.sh\n@@ -255,37 +255,7 @@ if   [ -x ./target/debug/mu ];   then MU=./target/debug/mu\n elif [ -x ./target/release/mu ]; then MU=./target/release/mu\n else MU=\"$(command -v mu || true)\"; fi\n [ -n \"${MU:-}\" ] || { echo \"${C_RED}ai-review: no mu binary found${C_OFF}\" >&2; exit 2; }\n \n-# ── Local-reviewer pre-flight: never trigger an ollama model reload ─────────\n-# The local ollama reviewer (primary-1 in single-shot, the per-commit leaf in\n-# chunked) reads $PROVIDER/$MODEL — so resolving them here covers both modes.\n-# A cold load of the 262k reviewer is minutes, and that reload has SIGTERM'd\n-# reviewers mid-stream before (see the MU_REVIEW_TIMEOUT note above). So decide\n-# from ollama's /api/ps what's actually resident:\n-#   - same model already loaded  -> run local (no delay)\n-#   - box reachable but empty     -> run local (a load evicts nobody)\n-#   - a DIFFERENT model loaded    -> fall back (don't evict it / eat the reload)\n-#   - ollama unreachable          -> fall back (can't run local against a dead box)\n-# Match is tag-tolerant (ollama reports ':latest'). Synthesis (SYNTH_*) is\n-# hosted by default and is not checked here.\n-ensure_local_reviewer_loaded() {\n-  [ \"$PROVIDER\" = ollama ] || return 0\n-  local base want body loaded shown\n-  base=\"${OLLAMA_API_BASE:-http://<ollama-host>}\"\n-  want=\"$MODEL\"; case \"$want\" in *:*) : ;; *) want=\"$want:latest\" ;; esac\n-  if ! body=\"$(curl -s --max-time 5 \"$base/api/ps\" 2>/dev/null)\"; then\n-    echo \"${C_DIM}ai-review: ollama unreachable at $base; primary-1 -> $FALLBACK_PROVIDER/$FALLBACK_MODEL.${C_OFF}\" >&2\n-    PROVIDER=\"$FALLBACK_PROVIDER\"; MODEL=\"$FALLBACK_MODEL\"; return 0\n-  fi\n-  loaded=\"$(printf '%s' \"$body\" | grep -o '\"name\":\"[^\"]*\"' | sed 's/^\"name\":\"//; s/\"$//')\"\n-  [ -z \"$loaded\" ] && return 0                      # reachable + empty -> safe load\n-  printf '%s\\n' \"$loaded\" | grep -qxF \"$want\" && return 0   # same model resident\n-  shown=\"${loaded//$'\\n'/, }\"\n-  echo \"${C_DIM}ai-review: ollama has a different model resident at $base (loaded: $shown); primary-1 -> $FALLBACK_PROVIDER/$FALLBACK_MODEL to avoid an eviction/reload.${C_OFF}\" >&2\n-  PROVIDER=\"$FALLBACK_PROVIDER\"; MODEL=\"$FALLBACK_MODEL\"\n-}\n-ensure_local_reviewer_loaded\n-\n if [ -n \"$TOOLS\" ]; then\n   TOOL_CLAUSE=\"Use the read and grep tools to inspect surrounding code when a judgement needs it.\"\n else\n",
+      "expected_findings": [
+        {
+          "id": "removed-ollama-preflight",
+          "severity": "major",
+          "file": "scripts/ai-review.sh",
+          "line": 258,
+          "keywords": ["pre-flight", "ollama", "eviction", "reload", "fallback", "resident"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "bash -n clean", "verified against the live box"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr287-blind-model-load-synth",
+      "language": "bash",
+      "title": "Reviewer launcher requests its model without checking what is resident, forcing an eviction with no fallback",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/scripts/run-reviewer.sh b/scripts/run-reviewer.sh\nnew file mode 100755\n--- /dev/null\n+++ b/scripts/run-reviewer.sh\n@@ -0,0 +1,19 @@\n+#!/usr/bin/env bash\n+set -euo pipefail\n+\n+# Run the local CI reviewer against the ollama box.\n+OLLAMA=\"${OLLAMA_API_BASE:-http://<ollama-host>}\"\n+MODEL=\"${REVIEW_MODEL:-qwen3-coder:30b}\"\n+FALLBACK=\"${REVIEW_FALLBACK:-openai/gpt-5.5}\"\n+DIFF_FILE=\"$1\"\n+\n+run_reviewer() {\n+  # Send the diff to the configured model. ollama keeps at most one model\n+  # resident; requesting a model that is not the loaded one cold-loads it\n+  # (minutes for a big reviewer) and SIGTERMs whatever was streaming.\n+  curl -s \"$OLLAMA/api/generate\" \\\n+    -d \"{\\\"model\\\":\\\"$MODEL\\\",\\\"prompt\\\":$(jq -Rs . < \"$DIFF_FILE\")}\"\n+}\n+\n+# Always run locally with the configured model.\n+run_reviewer\n",
+      "expected_findings": [
+        {
+          "id": "no-resident-check-no-fallback",
+          "severity": "major",
+          "file": "scripts/run-reviewer.sh",
+          "line": 20,
+          "keywords": ["resident", "preflight", "api/ps", "eviction", "fallback", "reload"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "shellcheck clean", "verified"]
+    }
+  ]
+}

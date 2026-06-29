@@ -1,0 +1,46 @@
+{
+  "pr": 265,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "The tool-dispatch approval gate awaits the approval oneshot in a tokio::select! with no timeout arm, so an `Ask`/`AskOnce` tool in a session with no interactive approver (e.g. unclassified MCP code_index in mu-solo) blocks the turn forever instead of failing closed.",
+  "severity": "blocker",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr265-approval-gate-unbounded-wait-reverse",
+      "language": "rust",
+      "title": "Remove the approval-gate timeout, re-introducing the unbounded-wait hang",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt. Do not claim to have run tests.",
+      "diff": "diff --git a/crates/mu-core/src/agent/loop_/execute_tools.rs b/crates/mu-core/src/agent/loop_/execute_tools.rs\n--- a/crates/mu-core/src/agent/loop_/execute_tools.rs\n+++ b/crates/mu-core/src/agent/loop_/execute_tools.rs\n@@ -28,17 +28,6 @@ const RETRY_STREAK_LIMIT: usize = 3;\n /// readability + uniqueness even across sessions.\n static ASK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);\n \n-/// Upper bound on how long the dispatch gate will wait for an approval\n-/// decision before failing closed. The approver lives across an unsecured\n-/// process boundary (remote frontend <-> daemon), so \"no response\" can be a\n-/// silent human OR a dropped channel - both resolve the same way: deny. A\n-/// turn must NEVER park forever on an approver that may not exist (that was\n-/// the MCP `code_index` wedge: unclassified -> Ask -> no solo approver ->\n-/// permanent hang).\n-const APPROVAL_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);\n-\n #[derive(Debug, Default)]\n pub(crate) struct ToolHistory {\n     pub(crate) entries: VecDeque<ToolHistoryEntry>,\n@@ -210,21 +199,6 @@ pub(crate) async fn handle_execute_tools(\n                         .await;\n                     let decision = tokio::select! {\n                         d = decision_rx => d.ok(),\n-                        _ = tokio::time::sleep(APPROVAL_GATE_TIMEOUT) => {\n-                            // No approver responded in time - fail closed.\n-                            // Drop the pending entry so a late responder\n-                            // can't fire a stale oneshot.\n-                            if let Ok(mut pending) = pending_approvals.lock() {\n-                                pending.remove(&request_id);\n-                            }\n-                            permission_refusal_reason = Some(format!(\n-                                \"tool `{}` required approval but no approver responded within \\\n-                                 {}s - denied (fail-closed).\",\n-                                call.name,\n-                                APPROVAL_GATE_TIMEOUT.as_secs()\n-                            ));\n-                            Some(ApprovalDecision::Deny)\n-                        }\n                         input_opt = input_rx.recv() => match input_opt {\n                             Some(AgentInput::Cancel) => {\n                                 if let Ok(mut pending) = pending_approvals.lock() {\n",
+      "expected_findings": [
+        {
+          "id": "approval-gate-unbounded-wait",
+          "severity": "blocker",
+          "file": "crates/mu-core/src/agent/loop_/execute_tools.rs",
+          "line": 200,
+          "keywords": ["timeout", "select", "hang", "approval", "oneshot", "fail-closed"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr265-approval-gate-unbounded-wait-synth",
+      "language": "rust",
+      "title": "Drop the approval-wait timeout arm, hanging the turn when no approver exists",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt. Do not claim to have run tests.",
+      "diff": "diff --git a/src/gate.rs b/src/gate.rs\n--- a/src/gate.rs\n+++ b/src/gate.rs\n@@ -1,25 +1,17 @@\n use tokio::sync::oneshot;\n-use std::time::Duration;\n-\n-/// Fail closed if no approver answers within this window.\n-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(180);\n \n pub enum Decision { Allow, Deny }\n \n /// Run a tool that needs human approval. The approver answers `decision_rx`.\n-/// In a headless session there is NO interactive approver, so `decision_rx`\n-/// is never resolved — the timeout is what guarantees this still terminates.\n+/// In a headless session there is NO interactive approver, so `decision_rx`\n+/// is never resolved.\n async fn run_gated(\n     tool: &str,\n     decision_rx: oneshot::Receiver<Decision>,\n ) -> Result<(), String> {\n     let decision = tokio::select! {\n         d = decision_rx => d.ok(),\n-        _ = tokio::time::sleep(APPROVAL_TIMEOUT) => {\n-            // No approver responded — deny (fail-closed).\n-            Some(Decision::Deny)\n-        }\n     };\n     match decision {\n         Some(Decision::Allow) => exec(tool).await,\n         Some(Decision::Deny) | None => Err(format!(\"{tool} denied\")),\n     }\n }\n",
+      "expected_findings": [
+        {
+          "id": "gate-oneshot-no-timeout",
+          "severity": "blocker",
+          "file": "src/gate.rs",
+          "line": 24,
+          "keywords": ["timeout", "select", "hang", "headless", "oneshot", "never resolved"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}

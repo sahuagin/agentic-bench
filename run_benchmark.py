@@ -22,6 +22,7 @@ model's residency (code-review-bench NOTES.md gotcha).
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -31,7 +32,7 @@ import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
 MU_BINARY = pathlib.Path.home() / "src/public_github/mu/target/release/mu"
-OLLAMA = "http://10.1.1.143:11434"
+OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 DEFAULT_MODELS = ["gpt-oss:20b", "qwen3-coder:30b", "qwen3.6:35b-a3b-q8_0"]
 RUN_TIMEOUT_S = 420  # cold loads of the 38GB q8_0 need headroom
 LEAK_RE = re.compile(r"<function=|</?tool_call>")

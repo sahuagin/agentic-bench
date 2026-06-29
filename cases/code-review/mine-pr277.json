@@ -1,0 +1,46 @@
+{
+  "pr": 277,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "bash",
+  "bug_summary": "The review script rebuilds the DEBUG mu binary but the binary-selection fallback prefers ./target/release/mu first, so it runs a stale release build that lacks the freshly-added flag instead of the binary the build just refreshed.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr277-stale-binary-pref-reverse",
+      "language": "bash",
+      "title": "ai-review.sh prefers stale release binary over the freshly-built debug binary",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/scripts/ai-review.sh b/scripts/ai-review.sh\n--- a/scripts/ai-review.sh\n+++ b/scripts/ai-review.sh\n@@ -221,12 +221,9 @@ fi\n \n # --- reviewer client = freshly-built mu, never the (possibly stale) installed one\n-# Prefer the DEBUG binary: it is the one the build line above just\n-# refreshed. Preferring release here once handed the panel a weeks-old\n-# release build that lacked a flag the script passed — every reviewer\n-# died at clap with UNCLEAR (2026-06-11). Release is only a fallback.\n cargo build --bin mu -q 2>/dev/null || true\n-if   [ -x ./target/debug/mu ];   then MU=./target/debug/mu\n-elif [ -x ./target/release/mu ]; then MU=./target/release/mu\n+if   [ -x ./target/release/mu ]; then MU=./target/release/mu\n+elif [ -x ./target/debug/mu ];   then MU=./target/debug/mu\n else MU=\"$(command -v mu || true)\"; fi\n [ -n \"${MU:-}\" ] || { echo \"${C_RED}ai-review: no mu binary found${C_OFF}\" >&2; exit 2; }\n",
+      "expected_findings": [
+        {
+          "id": "stale-release-binary-preferred",
+          "severity": "major",
+          "file": "scripts/ai-review.sh",
+          "line": 225,
+          "keywords": ["release", "debug", "stale", "cargo build", "fallback"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "shellcheck passes", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr277-stale-binary-pref-synth",
+      "language": "bash",
+      "title": "Script rebuilds the debug artifact but runs the possibly-stale release one",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/run-tool.sh b/run-tool.sh\nnew file mode 100755\n--- /dev/null\n+++ b/run-tool.sh\n@@ -0,0 +1,16 @@\n+#!/usr/bin/env bash\n+set -euo pipefail\n+\n+# Build a fresh DEBUG binary so we always test the current source,\n+# then invoke it with the brand-new --json flag.\n+cargo build --bin tool >/dev/null 2>&1 || true\n+\n+# Pick the binary to run.\n+if   [ -x ./target/release/tool ]; then BIN=./target/release/tool\n+elif [ -x ./target/debug/tool ];   then BIN=./target/debug/tool\n+else BIN=\"$(command -v tool)\"; fi\n+\n+# --json was added today; an older cached release build lacks it and\n+# will abort at argument parsing.\n+exec \"$BIN\" --json \"$@\"\n",
+      "expected_findings": [
+        {
+          "id": "prefers-stale-release-over-fresh-debug",
+          "severity": "major",
+          "file": "run-tool.sh",
+          "line": 9,
+          "keywords": ["release", "debug", "stale", "build", "prefer"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "shellcheck passes", "verified"]
+    }
+  ]
+}

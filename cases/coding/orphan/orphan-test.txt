@@ -1,0 +1,50 @@
+    #[test]
+    fn bench_acceptance_no_orphan_on_parallel_compaction() {
+        fn tool_args() -> crate::agent::types::ToolArgs {
+            crate::agent::types::ToolArgs::new(serde_json::json!({})).unwrap()
+        }
+        fn assistant_calls(id: &str, calls: &[&str]) -> Span {
+            let blocks: Vec<crate::agent::types::ContentBlock> = calls.iter().map(|c| {
+                crate::agent::types::ContentBlock::ToolCall(crate::agent::types::ToolCall {
+                    id: (*c).to_owned(), name: "tool".to_owned(), arguments: tool_args(),
+                })
+            }).collect();
+            Span::new(id, SpanKind::Assistant, "0123456789", RetentionClass::Hot).with_blocks(blocks)
+        }
+        fn tool_result(call_id: &str, content: &str) -> Span {
+            Span::new(format!("msg-0-tool-result:{call_id}"), SpanKind::ToolResult, content, RetentionClass::Warm)
+        }
+        fn assistant_call_ids(span: &Span) -> Vec<&str> {
+            span.blocks().map(|blocks| {
+                blocks.iter().filter_map(|b| match b {
+                    crate::agent::types::ContentBlock::ToolCall(tc) => Some(tc.id.as_str()),
+                    _ => None,
+                }).collect()
+            }).unwrap_or_default()
+        }
+        fn assert_no_orphans(result: &CompactionResult) {
+            let spans = result.rope.spans();
+            let ids: Vec<&str> = spans.iter().map(|s| s.id()).collect();
+            let surviving_results: std::collections::HashSet<&str> = spans.iter()
+                .filter(|s| *s.kind() == SpanKind::ToolResult)
+                .filter_map(|s| crate::context::assembly::extract_call_id_from_span_id(s.id()))
+                .collect();
+            let surviving_calls: std::collections::HashSet<&str> = spans.iter().flat_map(assistant_call_ids).collect();
+            for c in &surviving_calls {
+                assert!(surviving_results.contains(c), "orphaned tool_use {c}: no matching tool_result. survivors={ids:?}");
+            }
+            for r in &surviving_results {
+                assert!(surviving_calls.contains(r), "orphaned tool_result {r}: no matching tool_use. survivors={ids:?}");
+            }
+        }
+        let rope = RetainedRope::from_spans(vec![
+            span("a_old", SpanKind::Assistant, "old turn 0123456789"),
+            assistant_calls("a_tool", &["c1"]),
+            span("u_mid", SpanKind::User, "responding 0123456789"),
+            tool_result("c1", "r1 0123456789"),
+            span("a_last", SpanKind::Assistant, "most recent 0123456789"),
+        ]);
+        let target = target_from_rope(&rope, 0.3);
+        let r = SpanFamilyDropPolicy::new().compact(&rope, target);
+        assert_no_orphans(&r);
+    }

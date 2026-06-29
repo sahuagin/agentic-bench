@@ -1,0 +1,46 @@
+{
+  "pr": 282,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "SessionEventLog::append assigned event ids via a lock-free atomic and then wrote to disk and pushed to memory under separately-acquired locks, so a normal append could reserve id N while a concurrent append_command reserved/wrote/pushed id N+1 first, leaving on-disk JSONL order and in-memory snapshot order out of event-id order.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr282-append-order-lock-reverse",
+      "language": "rust",
+      "title": "SessionEventLog::append reserves id outside the disk-writer lock, racing the ordered command-append path",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-core/src/event_log.rs b/crates/mu-core/src/event_log.rs\n--- a/crates/mu-core/src/event_log.rs\n+++ b/crates/mu-core/src/event_log.rs\n@@ -861,21 +861,6 @@ impl SessionEventLog {\n     pub fn append_with_parents(\n         &self,\n         actor: EventActor,\n         payload: EventPayload,\n         parent_event_ids: Vec<u64>,\n     ) -> u64 {\n-        // mu-kgpg: this mutex is also the append-order mutex.  Both\n-        // best-effort appends and strict command appends hold it from\n-        // id assignment through disk projection and in-memory push, so\n-        // file order, event id order, and snapshot order cannot drift\n-        // across the two append paths.\n-        let mut disk_guard = match self.disk_writer.lock() {\n-            Ok(guard) => guard,\n-            Err(poisoned) => {\n-                tracing::warn!(\n-                    session_id = %self.session_id,\n-                    \"disk writer mutex poisoned; recovering for best-effort append\"\n-                );\n-                poisoned.into_inner()\n-            }\n-        };\n         let id = self.next_id.fetch_add(1, Ordering::Relaxed);\n         let event = SessionEvent {\n             id,\n             session_id: self.session_id.clone(),\n             parent_event_ids,\n             timestamp_unix_ms: now_unix_ms(),\n             actor,\n             payload,\n         };\n@@ -891,26 +876,7 @@ impl SessionEventLog {\n         // mu-upb: best-effort JSONL write before the in-memory push\n         // so the disk record is at least as complete as memory. IO\n         // failures are logged and ignored — disk persistence is not\n         // load-bearing for the running daemon.\n-        if let Some(file) = disk_guard.as_mut() {\n-            match serde_json::to_string(&event) {\n-                Ok(line) => {\n-                    if let Err(e) = writeln!(file, \"{line}\") {\n-                        tracing::warn!(\n-                            session_id = %self.session_id,\n-                            error = %e,\n-                            \"disk write failed; continuing in-memory only\"\n-                        );\n-                    }\n-                }\n-                Err(e) => {\n-                    tracing::warn!(\n-                        session_id = %self.session_id,\n-                        error = %e,\n-                        \"event serialization failed for disk write\"\n-                    );\n-                }\n-            }\n-        }\n+        self.write_to_disk(&event);\n         if let Ok(mut events) = self.events.lock() {\n             events.push(event);\n         } else {\n@@ -870,6 +836,33 @@ impl SessionEventLog {\n             .unwrap_or(false)\n     }\n \n+    fn write_to_disk(&self, event: &SessionEvent) {\n+        let Ok(mut guard) = self.disk_writer.lock() else {\n+            return;\n+        };\n+        let Some(file) = guard.as_mut() else {\n+            return;\n+        };\n+        match serde_json::to_string(event) {\n+            Ok(line) => {\n+                if let Err(e) = writeln!(file, \"{line}\") {\n+                    tracing::warn!(\n+                        session_id = %self.session_id,\n+                        error = %e,\n+                        \"disk write failed; continuing in-memory only\"\n+                    );\n+                }\n+            }\n+            Err(e) => {\n+                tracing::warn!(\n+                    session_id = %self.session_id,\n+                    error = %e,\n+                    \"event serialization failed for disk write\"\n+                );\n+            }\n+        }\n+    }\n+\n     /// Snapshot the log. Clones the inner vec — safe to read without\n     /// holding the lock.\n     pub fn snapshot(&self) -> Vec<SessionEvent> {\n",
+      "expected_findings": [
+        {
+          "id": "append-id-assigned-outside-lock-races-ordering",
+          "severity": "major",
+          "file": "crates/mu-core/src/event_log.rs",
+          "line": 882,
+          "keywords": ["ordering", "race", "lock", "append", "id", "concurrent"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr282-append-order-lock-synth",
+      "language": "go",
+      "title": "Append-only log reserves sequence id outside the mutex, so disk/slice order can drift from id order",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/eventlog/eventlog.go b/eventlog/eventlog.go\nnew file mode 100644\n--- /dev/null\n+++ b/eventlog/eventlog.go\n@@ -0,0 +1,44 @@\n+package eventlog\n+\n+import (\n+\t\"fmt\"\n+\t\"os\"\n+\t\"sync\"\n+\t\"sync/atomic\"\n+)\n+\n+// Log is an append-only event log mirrored to a JSONL-ish file. Each\n+// record gets a monotonic id; consumers replay the file and the\n+// in-memory slice and assume both are sorted by id.\n+type Log struct {\n+\tmu     sync.Mutex\n+\tnextID atomic.Uint64\n+\tfile   *os.File\n+\tevents []string\n+}\n+\n+// AppendCommand is the strict path: it holds mu across id assignment,\n+// the disk write, and the in-memory push, so file order and slice\n+// order always match id order.\n+func (l *Log) AppendCommand(payload string) uint64 {\n+\tl.mu.Lock()\n+\tdefer l.mu.Unlock()\n+\tid := l.nextID.Add(1)\n+\tline := fmt.Sprintf(\"%d:%s\\n\", id, payload)\n+\t_, _ = l.file.WriteString(line)\n+\tl.events = append(l.events, line)\n+\treturn id\n+}\n+\n+// Append is the best-effort path. It reserves an id WITHOUT the lock,\n+// then takes the lock separately to write and push.\n+func (l *Log) Append(payload string) uint64 {\n+\tid := l.nextID.Add(1)\n+\tline := fmt.Sprintf(\"%d:%s\\n\", id, payload)\n+\tl.mu.Lock()\n+\t_, _ = l.file.WriteString(line)\n+\tl.events = append(l.events, line)\n+\tl.mu.Unlock()\n+\treturn id\n+}\n",
+      "expected_findings": [
+        {
+          "id": "append-seq-reserved-before-lock-order-drift",
+          "severity": "major",
+          "file": "eventlog/eventlog.go",
+          "line": 39,
+          "keywords": ["race", "ordering", "lock", "atomic", "append", "concurrent"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "go test", "verified"]
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "pr": 331,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "Discovered ollama/vLLM models were assigned a fabricated 32768-token placeholder context window which, post context-limits-wire, was used directly as the soft limit that drives the compaction trigger — so an un-enriched model compacted every turn instead of falling back to the safe DEFAULT_COMPACTION_THRESHOLD when the window is unknown.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr331-placeholder-context-compaction-reverse",
+      "language": "rust",
+      "title": "Discovered ollama models get a fabricated 32k context placeholder that drives compaction every turn",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-core/src/route_catalog.rs b/crates/mu-core/src/route_catalog.rs\n--- a/crates/mu-core/src/route_catalog.rs\n+++ b/crates/mu-core/src/route_catalog.rs\n@@ -148,6 +148,11 @@ impl RouteCatalog {\n     /// via `mu_ai::OllamaProvider::discover_models` and passes them in\n     /// here. `configured = true` for every entry, because the names\n     /// only exist if the endpoint answered `/api/tags`. Context limits\n+    /// use a conservative placeholder ([`OLLAMA_DEFAULT_CONTEXT`]) since\n+    /// `/api/tags` doesn't report context windows; per-model enrichment\n+    /// via `/api/show` is a follow-up. Pricing is `None` (local = free).\n     pub fn with_ollama_models<I, S>(mut self, models: I) -> Self\n     where\n         I: IntoIterator<Item = S>,\n@@ -167,13 +172,8 @@ impl RouteCatalog {\n                 \"ollama\",\n                 m.as_ref(),\n                 true,\n-                // Unknown window: /api/tags reports none. Leave it None\n-                // (not a fabricated placeholder) so it can't drive\n-                // compaction; a per-model models.toml entry or the catalog\n-                // sync tool fills it in. Until then compaction uses the\n-                // safe DEFAULT, and the meter shows no fake denominator.\n-                None,\n-                None,\n+                OLLAMA_DEFAULT_CONTEXT,\n+                OLLAMA_DEFAULT_CONTEXT,\n             ));\n         }\n         self\n@@ -220,8 +220,8 @@ fn build_entry(\n     provider_kind: &str,\n     model: &str,\n     configured: bool,\n-    context_soft: Option<u64>,\n-    context_hard: Option<u64>,\n+    context_soft: u64,\n+    context_hard: u64,\n ) -> RouteEntry {\n     let catalog = model_catalog::global();\n     let pricing = pricing::for_model(provider_kind, model);\n     let model_settings = catalog.resolve_model(model);\n     let provider_settings = catalog.provider(provider_kind);\n \n-    let context_soft = model_settings.context_soft_limit.or(context_soft);\n-    let context_hard = model_settings.context_hard_limit.or(context_hard);\n+    let context_soft = model_settings.context_soft_limit.unwrap_or(context_soft);\n+    let context_hard = model_settings.context_hard_limit.unwrap_or(context_hard);\n     let favorites = catalog\n         .favorites_for(provider_kind, model)\n         .into_iter()\n@@ -305,8 +305,8 @@ fn build_entry(\n         quirks: model_settings.quirks.into_iter().map(Arc::from).collect(),\n         max_output_tokens: model_settings.max_output_tokens,\n         favorites,\n-        context_soft_limit: context_soft,\n-        context_hard_limit: context_hard,\n+        context_soft_limit: Some(context_soft),\n+        context_hard_limit: Some(context_hard),\n         valid_effort_levels: valid_effort,\n         pricing_input_per_mtok: pricing.map(|p| p.input_per_mtok),\n         pricing_output_per_mtok: pricing.map(|p| p.output_per_mtok),\n@@ -324,6 +324,11 @@ const OPENAI_CODEX_MODELS: &[(&str, u64, u64)] = &[(\"gpt-5.5\", 1_000_000, 1_000_000)];\n \n+/// Conservative placeholder context window for ollama models, applied\n+/// to both soft and hard limits. `/api/tags` doesn't report context\n+/// windows; per-model `/api/show` enrichment is a follow-up. (mu-818c)\n+const OLLAMA_DEFAULT_CONTEXT: u64 = 32_768;\n+\n const OPENROUTER_MODELS: &[(&str, u64, u64)] = &[\n     (\"anthropic/claude-opus-4.7\", 200_000, 1_000_000),\n     (\"anthropic/claude-sonnet-4.6\", 200_000, 200_000),\n",
+      "expected_findings": [
+        {
+          "id": "fabricated-context-placeholder-drives-compaction",
+          "severity": "major",
+          "file": "crates/mu-core/src/route_catalog.rs",
+          "line": 175,
+          "keywords": ["placeholder", "32768", "context", "soft", "compaction", "unknown"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr331-placeholder-context-compaction-synth",
+      "language": "rust",
+      "title": "Discovery path fabricates a small default context window that becomes the compaction threshold",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/src/catalog.rs b/src/catalog.rs\n--- a/src/catalog.rs\n+++ b/src/catalog.rs\n@@ -1,24 +1,33 @@\n /// Fallback used by the agent loop when a model's context window is\n /// unknown. Large on purpose: a real local model's window is far bigger\n /// than any small probe-time guess, so an unknown window must defer to\n /// this rather than trip the compaction trigger prematurely.\n const DEFAULT_COMPACTION_THRESHOLD: u64 = 150_000;\n \n pub struct ModelEntry {\n     pub name: String,\n     /// Soft context limit; `None` means \"unknown window\".\n     pub context_soft_limit: Option<u64>,\n }\n \n-/// Build an entry for a model discovered via `/api/tags`, which does NOT\n-/// report context windows. Unknown window stays `None`.\n-fn discovered_entry(name: &str) -> ModelEntry {\n+/// Build an entry for a model discovered via `/api/tags`, which does NOT\n+/// report context windows.\n+fn discovered_entry(name: &str) -> ModelEntry {\n+    // /api/tags gives us no window, so default to a conservative 32k.\n     ModelEntry {\n         name: name.to_string(),\n-        context_soft_limit: None,\n+        context_soft_limit: Some(32_768),\n     }\n }\n \n /// The agent loop compacts the conversation once estimated tokens exceed\n /// the soft limit; an unknown window falls back to the safe default.\n pub fn compaction_threshold(entry: &ModelEntry) -> u64 {\n     entry.context_soft_limit.unwrap_or(DEFAULT_COMPACTION_THRESHOLD)\n }\n",
+      "expected_findings": [
+        {
+          "id": "fabricated-default-window-trips-compaction",
+          "severity": "major",
+          "file": "src/catalog.rs",
+          "line": 27,
+          "keywords": ["placeholder", "32768", "none", "compaction", "threshold", "unknown"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}

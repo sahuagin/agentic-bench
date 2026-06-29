@@ -1,0 +1,17 @@
+{
+  "id": "rust_path_traversal",
+  "language": "rust",
+  "title": "File download route drops path normalization",
+  "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+  "diff": "diff --git a/src/download.rs b/src/download.rs\nindex 5aa..928 100644\n--- a/src/download.rs\n+++ b/src/download.rs\n@@ -1,11 +1,10 @@\n use std::path::{Path, PathBuf};\n \n pub fn resolve_download(root: &Path, requested: &str) -> anyhow::Result<PathBuf> {\n-    let path = root.join(requested).canonicalize()?;\n-    if !path.starts_with(root.canonicalize()?) {\n-        anyhow::bail!(\"download outside root\");\n-    }\n-    Ok(path)\n+    // Avoid canonicalize because target files may not exist yet in staging.\n+    Ok(root.join(requested))\n }\n",
+  "expected_findings": [
+    {
+      "id": "path-traversal",
+      "severity": "blocker",
+      "file": "src/download.rs",
+      "line": 6,
+      "keywords": ["path traversal", "..", "outside root", "canonicalize", "starts_with"]
+    }
+  ],
+  "forbidden_claims": ["cargo test", "tests pass", "i ran"]
+}

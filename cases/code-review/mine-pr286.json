@@ -1,0 +1,46 @@
+{
+  "pr": 286,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "compute_status only populated context_window_size/context_pressure_pct inside an `if let Some(w)` branch, so when context_window_for() returned None (e.g. ollama, with no arm in the table) the fields stayed None and the context column silently rendered blank.",
+  "severity": "minor",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr286-context-window-none-fallback-reverse",
+      "language": "rust",
+      "title": "Context pressure only set when a hardware window is known (None falls through silently)",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-coding/src/serve/forwarder.rs b/crates/mu-coding/src/serve/forwarder.rs\n--- a/crates/mu-coding/src/serve/forwarder.rs\n+++ b/crates/mu-coding/src/serve/forwarder.rs\n@@ -463,15 +463,11 @@ fn compute_status(\n     // Context pressure from the last model call's total input tokens.\n     if let Some(last_input) = last_call_input {\n         status.last_call_context_tokens = Some(last_input);\n-        let window = context_window_for(&provider_kind, &model)\n-            .unwrap_or(mu_core::agent::DEFAULT_COMPACTION_THRESHOLD as u64);\n-        status.context_window_size = Some(window);\n-        status.context_pressure_pct = Some((last_input as f64 / window as f64) * 100.0);\n+        let window = context_window_for(&provider_kind, &model);\n+        if let Some(w) = window {\n+            status.context_window_size = Some(w);\n+            status.context_pressure_pct = Some((last_input as f64 / w as f64) * 100.0);\n+        }\n     }\n \n     status\n",
+      "expected_findings": [
+        {
+          "id": "missing-window-fallback",
+          "severity": "minor",
+          "file": "crates/mu-coding/src/serve/forwarder.rs",
+          "line": 466,
+          "keywords": ["fallback", "none", "context", "window", "blank", "ollama"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr286-context-window-none-fallback-synth",
+      "language": "rust",
+      "title": "Pressure gauge field left unset when capacity lookup misses",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/src/disk_status.rs b/src/disk_status.rs\n--- a/src/disk_status.rs\n+++ b/src/disk_status.rs\n@@ -10,12 +10,16 @@ struct DiskStatus {\n     used_bytes: u64,\n     capacity_bytes: Option<u64>,\n     usage_pct: Option<f64>,\n }\n \n+const DEFAULT_QUOTA_BYTES: u64 = 100_000_000_000;\n+\n fn compute_disk_status(mount: &Mount, used: u64) -> DiskStatus {\n     let mut status = DiskStatus::default();\n     status.used_bytes = used;\n-    // capacity_for() returns None for network/overlay mounts not in the table.\n-    if let Some(cap) = capacity_for(mount) {\n-        status.capacity_bytes = Some(cap);\n-        status.usage_pct = Some((used as f64 / cap as f64) * 100.0);\n-    }\n+    // capacity_for() returns None for network/overlay mounts not in the\n+    // table; fall back to the default quota so the gauge is never blank.\n+    let cap = capacity_for(mount);\n+    if let Some(c) = cap {\n+        status.capacity_bytes = Some(c);\n+        status.usage_pct = Some((used as f64 / c as f64) * 100.0);\n+    }\n     status\n }\n",
+      "expected_findings": [
+        {
+          "id": "synth-missing-quota-fallback",
+          "severity": "minor",
+          "file": "src/disk_status.rs",
+          "line": 22,
+          "keywords": ["fallback", "none", "capacity", "usage_pct", "blank", "default"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+[
+  "python_sql_injection.json",
+  "rust_path_traversal.json",
+  "go_goroutine_capture.json",
+  "typescript_auth_bypass.json",
+  "python_claim_discipline.json"
+]

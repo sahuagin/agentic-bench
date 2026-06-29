@@ -1,0 +1,1043 @@
+diff --git a/crates/mu-ai/src/lib.rs b/crates/mu-ai/src/lib.rs
+index 6490c4ca..2fff3c3e 100644
+--- a/crates/mu-ai/src/lib.rs
++++ b/crates/mu-ai/src/lib.rs
+@@ -30,7 +30,9 @@ pub mod faux;
+ pub mod providers;
+ pub use context::{AnthropicCacheStrategy, AnthropicProviderRenderer};
+ pub use faux::{FauxProvider, FauxResponse};
+-pub use providers::{AnthropicProvider, OllamaProvider, OpenRouterProvider, OpenaiCodexProvider};
++pub use providers::{
++    AnthropicProvider, OllamaProvider, OpenRouterProvider, OpenaiCodexProvider, VllmProvider,
++};
+ 
+ pub fn version() -> &'static str {
+     env!("CARGO_PKG_VERSION")
+diff --git a/crates/mu-ai/src/providers/mod.rs b/crates/mu-ai/src/providers/mod.rs
+index ce921396..35df1ebd 100644
+--- a/crates/mu-ai/src/providers/mod.rs
++++ b/crates/mu-ai/src/providers/mod.rs
+@@ -14,8 +14,10 @@ pub mod openrouter;
+ pub mod output_limits;
+ pub mod sse;
+ pub(crate) mod tool_dialect;
++pub mod vllm;
+ 
+ pub use anthropic::AnthropicProvider;
+ pub use ollama::OllamaProvider;
+ pub use openai_codex::OpenaiCodexProvider;
+ pub use openrouter::OpenRouterProvider;
++pub use vllm::VllmProvider;
+diff --git a/crates/mu-ai/src/providers/output_limits.rs b/crates/mu-ai/src/providers/output_limits.rs
+index b0b8fe17..aef2a61f 100644
+--- a/crates/mu-ai/src/providers/output_limits.rs
++++ b/crates/mu-ai/src/providers/output_limits.rs
+@@ -86,12 +86,12 @@ mod tests {
+     fn openai_reasoning_models_get_16k() {
+         assert_eq!(max_tokens_for_model("gpt-5"), 16384);
+         assert_eq!(max_tokens_for_model("o4-mini"), 16384);
++        assert_eq!(max_tokens_for_model("deepseek/deepseek-v4-pro"), 16384);
+     }
+ 
+     #[test]
+     fn ollama_reasoning_models_get_16k() {
+         assert_eq!(max_tokens_for_model("gpt-oss:20b"), 16384);
+-        assert_eq!(max_tokens_for_model("gpt-oss:120b"), 16384);
+         assert_eq!(max_tokens_for_model("deepseek-r1:32b"), 16384);
+         assert_eq!(max_tokens_for_model("qwen3.6:35b-a3b-q8_0"), 16384);
+         // Non-reasoning local models keep the conservative default.
+diff --git a/crates/mu-ai/src/providers/vllm.rs b/crates/mu-ai/src/providers/vllm.rs
+new file mode 100644
+index 00000000..9442b860
+--- /dev/null
++++ b/crates/mu-ai/src/providers/vllm.rs
+@@ -0,0 +1,141 @@
++//! vLLM provider — OpenAI-compatible chat-completions against a local
++//! `vllm serve` process.
++//!
++//! vLLM exposes `/v1/chat/completions`, which is the same streaming wire
++//! already implemented by [`OpenRouterProvider`]. This provider composes
++//! that implementation with vLLM-specific env knobs and a `"vllm"` label.
++//!
++//! Env overrides: `VLLM_API_BASE` (default `http://127.0.0.1:8000`),
++//! `VLLM_API_PATH` (default `/v1/chat/completions`), `VLLM_API_KEY`
++//! (optional; defaults empty — local vLLM usually ignores auth).
++
++use async_trait::async_trait;
++use futures::stream::{BoxStream, StreamExt};
++use serde::Deserialize;
++use tokio::sync::oneshot;
++
++use mu_core::agent::{MessageInput, Provider, ProviderError, ProviderEvent, ToolSpec};
++use mu_core::context::ProviderRenderer;
++use std::sync::Arc;
++
++use super::openrouter::OpenRouterProvider;
++
++pub const VLLM_API_BASE: &str = "http://127.0.0.1:8000";
++pub const VLLM_API_PATH: &str = "/v1/chat/completions";
++
++pub fn base_from_env() -> String {
++    std::env::var("VLLM_API_BASE")
++        .ok()
++        .filter(|s| !s.is_empty())
++        .unwrap_or_else(|| VLLM_API_BASE.to_string())
++}
++
++fn path_from_env() -> String {
++    std::env::var("VLLM_API_PATH")
++        .ok()
++        .filter(|s| !s.is_empty())
++        .unwrap_or_else(|| VLLM_API_PATH.to_string())
++}
++
++pub struct VllmProvider {
++    inner: OpenRouterProvider,
++}
++
++impl VllmProvider {
++    pub fn from_env(model: String) -> Result<Self, ProviderError> {
++        let key = std::env::var("VLLM_API_KEY")
++            .ok()
++            .filter(|s| !s.is_empty())
++            .unwrap_or_default();
++        let inner = OpenRouterProvider::new(key, model)
++            .with_api_base(base_from_env())
++            .with_api_path(path_from_env());
++        Ok(Self { inner })
++    }
++
++    pub async fn discover_models(
++        base: &str,
++        timeout: std::time::Duration,
++    ) -> Result<Vec<String>, ProviderError> {
++        let url = format!("{}/v1/models", base.trim_end_matches('/'));
++        let client = reqwest::Client::builder()
++            .timeout(timeout)
++            .build()
++            .map_err(|e| ProviderError::Other(format!("vllm client build: {e}")))?;
++        let resp = client
++            .get(&url)
++            .send()
++            .await
++            .map_err(|e| ProviderError::Other(format!("vllm /v1/models request: {e}")))?;
++        if !resp.status().is_success() {
++            return Err(ProviderError::Other(format!(
++                "vllm /v1/models returned {}",
++                resp.status()
++            )));
++        }
++        let parsed: ModelsResponse = resp
++            .json()
++            .await
++            .map_err(|e| ProviderError::Other(format!("vllm /v1/models decode: {e}")))?;
++        Ok(parsed.data.into_iter().map(|m| m.id).collect())
++    }
++}
++
++#[async_trait]
++impl Provider for VllmProvider {
++    async fn stream(
++        &self,
++        system_prompt: Option<&str>,
++        input: MessageInput<'_>,
++        tools: &[ToolSpec],
++        cancel_rx: oneshot::Receiver<()>,
++    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
++        let inner = self
++            .inner
++            .stream(system_prompt, input, tools, cancel_rx)
++            .await?;
++        Ok(inner.boxed())
++    }
++
++    fn provider_label(&self) -> &'static str {
++        "vllm"
++    }
++
++    fn capabilities(&self) -> mu_core::agent::capabilities::ProviderCapabilities {
++        self.inner.capabilities()
++    }
++
++    fn renderer(&self) -> Arc<dyn ProviderRenderer> {
++        self.inner.renderer()
++    }
++}
++
++#[derive(Debug, Deserialize)]
++struct ModelsResponse {
++    #[serde(default)]
++    data: Vec<ModelEntry>,
++}
++
++#[derive(Debug, Deserialize)]
++struct ModelEntry {
++    id: String,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn from_env_constructs_without_key() {
++        let p = VllmProvider::from_env("Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8".to_string())
++            .expect("local vllm provider should not require an API key");
++        assert_eq!(p.provider_label(), "vllm");
++    }
++
++    #[test]
++    fn base_from_env_defaults_to_baked_in() {
++        if std::env::var("VLLM_API_BASE").is_err() {
++            assert_eq!(base_from_env(), VLLM_API_BASE);
++        }
++    }
++}
+diff --git a/crates/mu-coding/src/serve/dispatch.rs b/crates/mu-coding/src/serve/dispatch.rs
+index ce655cb7..590e6311 100644
+--- a/crates/mu-coding/src/serve/dispatch.rs
++++ b/crates/mu-coding/src/serve/dispatch.rs
+@@ -146,6 +146,7 @@ pub async fn dispatch(
+             sessions,
+             factory,
+             tools,
++            skills,
+             daemon_info.clone(),
+         ),
+         DelegateSessionRequest::METHOD => handle_delegate_session(
+@@ -154,6 +155,7 @@ pub async fn dispatch(
+             sessions,
+             factory,
+             tools,
++            skills,
+             daemon_info.clone(),
+         ),
+         // mu-mh4: strict fork-at-tail resume.
+@@ -163,6 +165,7 @@ pub async fn dispatch(
+             sessions,
+             factory,
+             tools,
++            skills,
+             daemon_info.clone(),
+         ),
+         AskSessionRequest::METHOD => handle_ask_session(request, sessions).await,
+diff --git a/crates/mu-coding/src/serve/factory.rs b/crates/mu-coding/src/serve/factory.rs
+index a0738bef..7d2bbd22 100644
+--- a/crates/mu-coding/src/serve/factory.rs
++++ b/crates/mu-coding/src/serve/factory.rs
+@@ -10,6 +10,7 @@ use anyhow::Result;
+ 
+ use mu_ai::{
+     AnthropicProvider, FauxProvider, OllamaProvider, OpenRouterProvider, OpenaiCodexProvider,
++    VllmProvider,
+ };
+ use mu_core::agent::{Provider, Tool};
+ use mu_core::context::CacheTtl;
+@@ -112,6 +113,10 @@ pub fn build_provider_from_selector(
+             log_thinking_ignored("openrouter", thinking);
+             Ok(Arc::new(OpenRouterProvider::from_env(model.clone())?))
+         }
++        ProviderSelector::Vllm { model } => {
++            log_thinking_ignored("vllm", thinking);
++            Ok(Arc::new(VllmProvider::from_env(model.clone())?))
++        }
+         ProviderSelector::Ollama { model } => {
+             log_thinking_ignored("ollama", thinking);
+             Ok(Arc::new(OllamaProvider::from_env(model.clone())?))
+@@ -139,11 +144,16 @@ pub fn selector_from_cli(name: &str, model: Option<&str>) -> Result<ProviderSele
+         "openrouter" => Ok(ProviderSelector::Openrouter {
+             model: model.unwrap_or("anthropic/claude-haiku-4.5").to_string(),
+         }),
++        "vllm" => Ok(ProviderSelector::Vllm {
++            model: model
++                .unwrap_or("Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8")
++                .to_string(),
++        }),
+         "ollama" => Ok(ProviderSelector::Ollama {
+             model: model.unwrap_or("qwen3-coder:30b").to_string(),
+         }),
+         other => anyhow::bail!(
+-            "unknown provider: {other} (expected: faux, anthropic-api, openai-codex, openrouter, ollama)"
++            "unknown provider: {other} (expected: faux, anthropic-api, openai-codex, openrouter, vllm, ollama)"
+         ),
+     }
+ }
+@@ -307,6 +317,14 @@ mod tests {
+             _ => panic!("expected Openrouter"),
+         }
+ 
++        let s = selector_from_cli("vllm", None).unwrap();
++        assert_eq!(
++            s,
++            ProviderSelector::Vllm {
++                model: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8".into()
++            }
++        );
++
+         // ollama: default model + explicit override (mu-818c).
+         let s = selector_from_cli("ollama", None).unwrap();
+         assert_eq!(
+diff --git a/crates/mu-coding/src/serve/handlers/session.rs b/crates/mu-coding/src/serve/handlers/session.rs
+index 2b67c8d8..4fea4e19 100644
+--- a/crates/mu-coding/src/serve/handlers/session.rs
++++ b/crates/mu-coding/src/serve/handlers/session.rs
+@@ -47,6 +47,7 @@ pub fn handle_create_session(
+     sessions: Sessions,
+     factory: ProviderFactory,
+     tools: Arc<Vec<Arc<dyn Tool>>>,
++    skills: Arc<Vec<mu_core::skill::loader::LoadedSkill>>,
+     daemon_info: DaemonInfo,
+ ) -> Response<Value> {
+     let params: CreateSessionRequest = match serde_json::from_value(request.params.clone()) {
+@@ -91,6 +92,7 @@ pub fn handle_create_session(
+         sessions,
+         factory,
+         tools,
++        skills,
+         daemon_info: &daemon_info,
+     }) {
+         Ok(session_id) => {
+@@ -111,6 +113,7 @@ pub fn handle_delegate_session(
+     sessions: Sessions,
+     factory: ProviderFactory,
+     tools: Arc<Vec<Arc<dyn Tool>>>,
++    skills: Arc<Vec<mu_core::skill::loader::LoadedSkill>>,
+     daemon_info: DaemonInfo,
+ ) -> Response<Value> {
+     let params: DelegateSessionRequest = match serde_json::from_value(request.params.clone()) {
+@@ -175,6 +178,7 @@ pub fn handle_delegate_session(
+         sessions,
+         factory,
+         tools,
++        skills,
+         daemon_info: &daemon_info,
+     }) {
+         Ok(child_session_id) => {
+@@ -216,6 +220,7 @@ pub fn handle_resume_session(
+     sessions: Sessions,
+     factory: ProviderFactory,
+     tools: Arc<Vec<Arc<dyn Tool>>>,
++    skills: Arc<Vec<mu_core::skill::loader::LoadedSkill>>,
+     daemon_info: DaemonInfo,
+ ) -> Response<Value> {
+     use mu_core::protocol::{ResumeSessionRequest, ResumeSessionResponse, SessionRef};
+@@ -358,6 +363,7 @@ pub fn handle_resume_session(
+         sessions: sessions.clone(),
+         factory,
+         tools,
++        skills,
+         daemon_info: &daemon_info,
+     }) {
+         Ok(id) => id,
+@@ -416,6 +422,7 @@ struct BuildSessionRequest<'a> {
+     sessions: Sessions,
+     factory: ProviderFactory,
+     tools: Arc<Vec<Arc<dyn Tool>>>,
++    skills: Arc<Vec<mu_core::skill::loader::LoadedSkill>>,
+     daemon_info: &'a DaemonInfo,
+ }
+ 
+@@ -495,6 +502,7 @@ fn build_and_register_session(req: BuildSessionRequest<'_>) -> Result<String, St
+         sessions,
+         factory,
+         tools,
++        skills,
+         daemon_info,
+         cache_ttl,
+     } = req;
+@@ -581,16 +589,14 @@ fn build_and_register_session(req: BuildSessionRequest<'_>) -> Result<String, St
+         &autonomy,
+     );
+     // mu-onq8: always-on in-loop capability discovery. Ranks the session's
+-    // sibling tools (attenuated by this session's capability) against a
+-    // free-text intent, so the agent can find the right tool in-loop instead
+-    // of shelling out to the allowlist-blocked bash path. Built over a
+-    // snapshot of the siblings (excludes itself). Skills are not yet threaded
+-    // here (tools-only v1); the daemon's discovered skills join in the mu-onq8
+-    // follow-up (pairs with mu-re0s).
++    // sibling tools (attenuated by this session's capability) plus the
++    // daemon-discovered skills against a free-text intent, so the agent can
++    // find the right capability in-loop instead of shelling out to the
++    // allowlist-blocked bash path.
+     let discover_siblings = Arc::new(session_tools.clone());
+     session_tools.push(Arc::new(crate::tools::DiscoverTool::new(
+         discover_siblings,
+-        Arc::new(Vec::<mu_core::skill::loader::LoadedSkill>::new()),
++        skills.clone(),
+         capability_handle.clone(),
+         // mu-kex4.6.3: semantic ranking is opt-in via [index].semantic_discover.
+         daemon_info.config().index.semantic_discover,
+@@ -716,6 +722,7 @@ fn describe_selector(selector: &ProviderSelector) -> (String, String) {
+         ProviderSelector::OpenaiApi { model } => ("openai_api".into(), model.clone()),
+         ProviderSelector::OpenaiCodex { model } => ("openai_codex".into(), model.clone()),
+         ProviderSelector::Openrouter { model } => ("openrouter".into(), model.clone()),
++        ProviderSelector::Vllm { model } => ("vllm".into(), model.clone()),
+         ProviderSelector::Ollama { model } => ("ollama".into(), model.clone()),
+     }
+ }
+@@ -2073,6 +2080,7 @@ mod tests {
+             sessions.clone(),
+             factory,
+             tools,
++            Arc::new(Vec::new()),
+             di,
+         );
+         let value = serde_json::to_value(&resp).expect("serialize response");
+diff --git a/crates/mu-coding/src/tools/bash.rs b/crates/mu-coding/src/tools/bash.rs
+index c89fa1be..295c79bd 100644
+--- a/crates/mu-coding/src/tools/bash.rs
++++ b/crates/mu-coding/src/tools/bash.rs
+@@ -202,7 +202,9 @@ impl Tool for BashTool {
+             ),
+             BashMode::Yolo => (
+                 "YOLO MODE: any command runs via bash -c. Pipes, redirects, env vars all work. \
+-                 Treat this as if you have a shell prompt; behave responsibly.",
++                 Treat this as if you have a shell prompt; behave responsibly. \
++                 Bash path quoting: unquoted ~/path expands, but quoted \"~/path\" and '~/path' do not. \
++                 For paths that need expansion and may need quoting, use \"$HOME/path\" or an absolute path.",
+                 ToolPolicy {
+                     side_effects: SideEffects::Destructive,
+                     permission: PermissionLevel::Allow,
+diff --git a/crates/mu-coding/src/tools/edit.rs b/crates/mu-coding/src/tools/edit.rs
+index fff62ff9..d1d55691 100644
+--- a/crates/mu-coding/src/tools/edit.rs
++++ b/crates/mu-coding/src/tools/edit.rs
+@@ -16,6 +16,8 @@ use mu_core::agent::{
+ use serde_json::{json, Value};
+ use tokio::sync::oneshot;
+ 
++use crate::tools::path::expand_leading_tilde;
++
+ pub struct EditTool;
+ 
+ impl EditTool {
+@@ -213,7 +215,7 @@ fn path_argument(arguments: &Value) -> Result<PathBuf, ToolResult> {
+     arguments
+         .get("path")
+         .and_then(Value::as_str)
+-        .map(PathBuf::from)
++        .map(expand_leading_tilde)
+         .ok_or_else(|| ToolResult {
+             content: "edit: missing required `path` argument".to_owned(),
+             is_error: true,
+diff --git a/crates/mu-coding/src/tools/glob.rs b/crates/mu-coding/src/tools/glob.rs
+index 4741c2e0..12d21205 100644
+--- a/crates/mu-coding/src/tools/glob.rs
++++ b/crates/mu-coding/src/tools/glob.rs
+@@ -4,7 +4,6 @@
+ //! `fd` respects `.gitignore` and is fast. See spec mu-024.
+ 
+ use std::future::Future;
+-use std::path::PathBuf;
+ use std::pin::Pin;
+ use std::process::Stdio;
+ 
+@@ -12,6 +11,8 @@ use mu_core::agent::{Tool, ToolResult, ToolSpec};
+ use serde_json::{json, Value};
+ use tokio::sync::oneshot;
+ 
++use crate::tools::path::expand_leading_tilde;
++
+ pub struct GlobTool;
+ 
+ impl GlobTool {
+@@ -127,7 +128,7 @@ impl Tool for GlobTool {
+             let path = arguments
+                 .get("path")
+                 .and_then(Value::as_str)
+-                .map(PathBuf::from);
++                .map(expand_leading_tilde);
+             // mu-wkn: a tool named "glob" should glob by default.
+             // Legacy callers passing explicit `glob: true` still work;
+             // regex behavior is preserved via explicit `glob: false`.
+@@ -287,6 +288,7 @@ mod tests {
+     use super::*;
+     use std::error::Error;
+     use std::fs;
++    use std::path::PathBuf;
+     use std::time::{SystemTime, UNIX_EPOCH};
+ 
+     fn temp_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+diff --git a/crates/mu-coding/src/tools/grep.rs b/crates/mu-coding/src/tools/grep.rs
+index 29e80064..14cf4d06 100644
+--- a/crates/mu-coding/src/tools/grep.rs
++++ b/crates/mu-coding/src/tools/grep.rs
+@@ -5,7 +5,6 @@
+ //! Arguments map directly to ripgrep flags. See spec mu-023.
+ 
+ use std::future::Future;
+-use std::path::PathBuf;
+ use std::pin::Pin;
+ use std::process::Stdio;
+ 
+@@ -14,6 +13,8 @@ use mu_core::agent::{Tool, ToolResult, ToolSpec};
+ use serde_json::{json, Value};
+ use tokio::sync::oneshot;
+ 
++use crate::tools::path::expand_leading_tilde;
++
+ /// mu-yyi: GrepTool now carries an optional `rg_path` field so the
+ /// ripgrep binary location is injectable at construction. The old
+ /// design read `MU_RG_BINARY` from process env every call — that
+@@ -162,7 +163,7 @@ impl Tool for GrepTool {
+             let path = arguments
+                 .get("path")
+                 .and_then(Value::as_str)
+-                .map(PathBuf::from);
++                .map(expand_leading_tilde);
+             let glob = arguments
+                 .get("glob")
+                 .and_then(Value::as_str)
+@@ -345,6 +346,7 @@ mod tests {
+     use super::*;
+     use std::error::Error;
+     use std::fs;
++    use std::path::PathBuf;
+     use std::time::{SystemTime, UNIX_EPOCH};
+ 
+     fn temp_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+diff --git a/crates/mu-coding/src/tools/ls.rs b/crates/mu-coding/src/tools/ls.rs
+index a5948539..2d614a49 100644
+--- a/crates/mu-coding/src/tools/ls.rs
++++ b/crates/mu-coding/src/tools/ls.rs
+@@ -6,6 +6,8 @@ use mu_core::agent::{Tool, ToolResult, ToolSpec};
+ use serde_json::{json, Value};
+ use tokio::sync::oneshot;
+ 
++use crate::tools::path::expand_leading_tilde;
++
+ pub struct LsTool;
+ 
+ impl LsTool {
+@@ -79,7 +81,7 @@ fn path_argument(arguments: &Value) -> PathBuf {
+     arguments
+         .get("path")
+         .and_then(Value::as_str)
+-        .map(PathBuf::from)
++        .map(expand_leading_tilde)
+         .unwrap_or_else(|| PathBuf::from("."))
+ }
+ 
+diff --git a/crates/mu-coding/src/tools/mod.rs b/crates/mu-coding/src/tools/mod.rs
+index d0353325..c6e32ba7 100644
+--- a/crates/mu-coding/src/tools/mod.rs
++++ b/crates/mu-coding/src/tools/mod.rs
+@@ -8,6 +8,7 @@ pub mod glob;
+ pub mod grep;
+ pub mod ls;
+ pub mod memory_recall;
++pub mod path;
+ pub mod read;
+ pub mod spawn_worker;
+ pub mod watch;
+diff --git a/crates/mu-coding/src/tools/path.rs b/crates/mu-coding/src/tools/path.rs
+new file mode 100644
+index 00000000..10165579
+--- /dev/null
++++ b/crates/mu-coding/src/tools/path.rs
+@@ -0,0 +1,48 @@
++use std::path::PathBuf;
++
++/// Expand human path shorthand accepted by shell users without turning
++/// structured path arguments into shell strings. Only leading `~` and
++/// `~/...` are expanded; `$VARS`, globs, command substitution, and
++/// `~user` are not.
++pub fn expand_leading_tilde(path: &str) -> PathBuf {
++    match path {
++        "~" => home_dir().unwrap_or_else(|| PathBuf::from(path)),
++        _ if path.starts_with("~/") => home_dir()
++            .map(|home| home.join(&path[2..]))
++            .unwrap_or_else(|| PathBuf::from(path)),
++        _ => PathBuf::from(path),
++    }
++}
++
++fn home_dir() -> Option<PathBuf> {
++    std::env::var_os("HOME")
++        .filter(|home| !home.is_empty())
++        .map(PathBuf::from)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn expands_current_users_home() {
++        let Some(home) = home_dir() else {
++            return;
++        };
++        assert_eq!(expand_leading_tilde("~"), home);
++        assert_eq!(expand_leading_tilde("~/src"), home.join("src"));
++    }
++
++    #[test]
++    fn does_not_expand_other_shell_syntax() {
++        assert_eq!(
++            expand_leading_tilde("~other/src"),
++            PathBuf::from("~other/src")
++        );
++        assert_eq!(
++            expand_leading_tilde("$HOME/src"),
++            PathBuf::from("$HOME/src")
++        );
++        assert_eq!(expand_leading_tilde("*.rs"), PathBuf::from("*.rs"));
++    }
++}
+diff --git a/crates/mu-coding/src/tools/read.rs b/crates/mu-coding/src/tools/read.rs
+index 4d047e03..b4baff02 100644
+--- a/crates/mu-coding/src/tools/read.rs
++++ b/crates/mu-coding/src/tools/read.rs
+@@ -2,9 +2,11 @@ use std::future::Future;
+ use std::path::PathBuf;
+ use std::pin::Pin;
+ 
++use tokio::sync::oneshot;
++
++use crate::tools::path::expand_leading_tilde;
+ use mu_core::agent::{Tool, ToolResult, ToolSpec};
+ use serde_json::{json, Value};
+-use tokio::sync::oneshot;
+ 
+ pub struct ReadTool;
+ 
+@@ -95,7 +97,7 @@ fn path_argument(arguments: &Value) -> Result<PathBuf, ToolResult> {
+     arguments
+         .get("path")
+         .and_then(Value::as_str)
+-        .map(PathBuf::from)
++        .map(expand_leading_tilde)
+         .ok_or_else(|| ToolResult {
+             content: "missing required `path` argument".to_owned(),
+             is_error: true,
+@@ -108,7 +110,31 @@ mod tests {
+     use std::error::Error;
+     use std::fs;
+     use std::path::Path;
+-    use std::time::{SystemTime, UNIX_EPOCH};
++    use std::time::{Duration, SystemTime, UNIX_EPOCH};
++
++    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
++
++    struct EnvVarGuard {
++        name: &'static str,
++        old_value: Option<std::ffi::OsString>,
++    }
++
++    impl EnvVarGuard {
++        fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
++            let old_value = std::env::var_os(name);
++            std::env::set_var(name, value);
++            Self { name, old_value }
++        }
++    }
++
++    impl Drop for EnvVarGuard {
++        fn drop(&mut self) {
++            match &self.old_value {
++                Some(value) => std::env::set_var(self.name, value),
++                None => std::env::remove_var(self.name),
++            }
++        }
++    }
+ 
+     fn temp_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+@@ -201,12 +227,35 @@ mod tests {
+         let (cancel_tx, cancel_rx) = oneshot::channel();
+         let _ = cancel_tx.send(());
+ 
++        let result = tokio::time::timeout(
++            Duration::from_millis(500),
++            ReadTool::new().execute(json!({ "path": path.to_string_lossy() }), cancel_rx),
++        )
++        .await?;
++        let _ = fs::remove_file(&path);
++
++        assert!(result.is_error || result.content == "content");
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn b7_expands_home_shorthand() -> Result<(), Box<dyn Error>> {
++        let home = temp_path("home")?;
++        fs::create_dir(&home)?;
++        let path = home.join("tilde-file.txt");
++        fs::write(&path, "from home")?;
++
++        let _lock = ENV_LOCK.lock().await;
++        let _home_guard = EnvVarGuard::set("HOME", home.as_os_str());
++        let (_cancel_tx, cancel_rx) = oneshot::channel();
+         let result = ReadTool::new()
+-            .execute(json!({ "path": path.to_string_lossy() }), cancel_rx)
++            .execute(json!({ "path": "~/tilde-file.txt" }), cancel_rx)
+             .await;
+         let _ = fs::remove_file(&path);
++        let _ = fs::remove_dir(&home);
+ 
+-        assert!(result.is_error || result.content == "content");
++        assert!(!result.is_error, "{}", result.content);
++        assert_eq!(result.content, "from home");
+         Ok(())
+     }
+ }
+diff --git a/crates/mu-coding/src/tools/write.rs b/crates/mu-coding/src/tools/write.rs
+index 9b08b8ea..fd37ce78 100644
+--- a/crates/mu-coding/src/tools/write.rs
++++ b/crates/mu-coding/src/tools/write.rs
+@@ -8,6 +8,8 @@ use mu_core::agent::{
+ use serde_json::{json, Value};
+ use tokio::sync::oneshot;
+ 
++use crate::tools::path::expand_leading_tilde;
++
+ pub struct WriteTool;
+ 
+ impl WriteTool {
+@@ -104,7 +106,7 @@ fn path_argument(arguments: &Value) -> Result<PathBuf, ToolResult> {
+     arguments
+         .get("path")
+         .and_then(Value::as_str)
+-        .map(PathBuf::from)
++        .map(expand_leading_tilde)
+         .ok_or_else(|| ToolResult {
+             content: "missing required `path` argument".to_owned(),
+             is_error: true,
+diff --git a/crates/mu-core/config/models.default.toml b/crates/mu-core/config/models.default.toml
+index 5bd31640..609b03c1 100644
+--- a/crates/mu-core/config/models.default.toml
++++ b/crates/mu-core/config/models.default.toml
+@@ -18,6 +18,14 @@ label = "OpenRouter"
+ requires_api_key = true
+ usage_semantics = "openai_style"
+ 
++[providers.vllm]
++kind = "vllm"
++label = "vLLM"
++aliases = ["local-vllm"]
++requires_api_key = false
++usage_semantics = "openai_style"
++quirks = ["local_openai_compatible"]
++
+ [providers.ollama]
+ kind = "ollama"
+ label = "Ollama"
+@@ -92,6 +100,24 @@ max_output_tokens = 16384
+ reasoning_in_output = true
+ quirks = ["thinking_counts_against_max_tokens", "may_return_empty_visible_output_at_low_max_tokens"]
+ 
++[models.qwen3_coder_next_agent262k]
++model = "qwen3-coder-next-agent262k"
++family = "qwen3-coder-next"
++label = "Qwen3 Coder Next Agent 262k"
++context_soft_limit = 262144
++context_hard_limit = 262144
++max_output_tokens = 32768
++
++[models.deepseek_v4_pro]
++model = "deepseek/deepseek-v4-pro"
++family = "deepseek-v4"
++label = "DeepSeek V4 Pro"
++max_output_tokens = 16384
++
++[model_rules.deepseek_openrouter]
++prefix = "deepseek/"
++max_output_tokens = 16384
++
+ [favorites.local_qwen36]
+ provider = "ollama"
+ model = "qwen3.6:35b-a3b-q8_0"
+diff --git a/crates/mu-core/src/protocol/session.rs b/crates/mu-core/src/protocol/session.rs
+index 0d4947f0..dd52dabc 100644
+--- a/crates/mu-core/src/protocol/session.rs
++++ b/crates/mu-core/src/protocol/session.rs
+@@ -94,6 +94,12 @@ pub enum ProviderSelector {
+     Openrouter {
+         model: String,
+     },
++    /// Local vLLM/OpenAI-compatible server. Wire kind `"vllm"`.
++    /// Endpoint defaults to `http://127.0.0.1:8000`, overridable via
++    /// `VLLM_API_BASE`; path overridable via `VLLM_API_PATH`.
++    Vllm {
++        model: String,
++    },
+     /// Local ollama server (OpenAI-compatible). Wire kind `"ollama"`.
+     /// Endpoint defaults to the LAN box (`http://<ollama-host>`),
+     /// overridable via `OLLAMA_API_BASE`. (bead mu-818c)
+diff --git a/crates/mu-core/src/route_catalog.rs b/crates/mu-core/src/route_catalog.rs
+index a8480c5e..b810b965 100644
+--- a/crates/mu-core/src/route_catalog.rs
++++ b/crates/mu-core/src/route_catalog.rs
+@@ -86,6 +86,10 @@ impl RouteCatalog {
+             .ok()
+             .filter(|s| !s.is_empty())
+             .is_some();
++        let vllm_configured = std::env::var("VLLM_API_BASE")
++            .ok()
++            .filter(|s| !s.is_empty())
++            .is_some();
+ 
+         let mut entries = Vec::new();
+ 
+@@ -113,6 +117,10 @@ impl RouteCatalog {
+             ));
+         }
+ 
++        for (model, soft, hard) in VLLM_MODELS {
++            entries.push(build_entry("vllm", model, vllm_configured, *soft, *hard));
++        }
++
+         entries.push(build_entry("faux", "faux", true, 128_000, 128_000));
+ 
+         Self { entries }
+@@ -146,6 +154,27 @@ impl RouteCatalog {
+         self
+     }
+ 
++    /// Merge dynamically-discovered vLLM models into the catalog.
++    /// vLLM exposes OpenAI-compatible `/v1/models`; the daemon probes it
++    /// at startup and passes the returned ids here. Context defaults to
++    /// 32k until per-model enrichment exists.
++    pub fn with_vllm_models<I, S>(mut self, models: I) -> Self
++    where
++        I: IntoIterator<Item = S>,
++        S: AsRef<str>,
++    {
++        for m in models {
++            self.entries.push(build_entry(
++                "vllm",
++                m.as_ref(),
++                true,
++                VLLM_DEFAULT_CONTEXT,
++                VLLM_DEFAULT_CONTEXT,
++            ));
++        }
++        self
++    }
++
+     pub fn entries(&self) -> &[RouteEntry] {
+         &self.entries
+     }
+@@ -261,6 +290,10 @@ const OPENAI_CODEX_MODELS: &[(&str, u64, u64)] = &[("gpt-5.5", 1_000_000, 1_000_
+ /// windows; per-model `/api/show` enrichment is a follow-up. (mu-818c)
+ const OLLAMA_DEFAULT_CONTEXT: u64 = 32_768;
+ 
++/// Conservative placeholder context window for vLLM-served models.
++/// `/v1/models` reports ids, not context windows.
++const VLLM_DEFAULT_CONTEXT: u64 = 32_768;
++
+ const OPENROUTER_MODELS: &[(&str, u64, u64)] = &[
+     ("anthropic/claude-opus-4.7", 200_000, 1_000_000),
+     ("anthropic/claude-sonnet-4.6", 200_000, 200_000),
+@@ -269,10 +302,15 @@ const OPENROUTER_MODELS: &[(&str, u64, u64)] = &[
+     ("google/gemini-2.5-pro", 1_000_000, 1_000_000),
+ ];
+ 
++const VLLM_MODELS: &[(&str, u64, u64)] =
++    &[("Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8", 32_768, 32_768)];
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
++    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
+     #[test]
+     fn faux_always_configured() {
+         let catalog = RouteCatalog::from_env();
+@@ -362,6 +400,23 @@ mod tests {
+             .any(|f| f.name.as_ref() == "local_qwen36"));
+     }
+ 
++    #[test]
++    fn vllm_qwen_route_is_cataloged_when_base_configured() {
++        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++        let prev = std::env::var("VLLM_API_BASE").ok();
++        std::env::set_var("VLLM_API_BASE", "http://rtx4000:8000");
++        let catalog = RouteCatalog::from_env();
++        let q = catalog
++            .find("vllm", "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8")
++            .expect("built-in vllm qwen route should be present");
++        assert!(q.configured);
++        assert_eq!(q.context_hard_limit, Some(32_768));
++        match prev {
++            Some(v) => std::env::set_var("VLLM_API_BASE", v),
++            None => std::env::remove_var("VLLM_API_BASE"),
++        }
++    }
++
+     #[test]
+     fn with_ollama_models_empty_is_noop() {
+         let base = RouteCatalog::from_env().entries().len();
+diff --git a/crates/mu-solo/src/app.rs b/crates/mu-solo/src/app.rs
+index e3b2a328..cc5cea7e 100644
+--- a/crates/mu-solo/src/app.rs
++++ b/crates/mu-solo/src/app.rs
+@@ -66,6 +66,8 @@ const KNOWN_PROVIDERS: &[&str] = &[
+     "anthropic-oauth",
+     "openai-api",
+     "openrouter",
++    "vllm",
++    "ollama",
+     "faux",
+ ];
+ 
+@@ -98,6 +100,8 @@ fn known_models_for(provider: &str) -> &'static [&'static str] {
+             "x-ai/grok-4.3",
+             "meta-llama/llama-4-maverick",
+         ],
++        "vllm" => &["Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"],
++        "ollama" => &["qwen3-coder:30b", "qwen3.6:35b-a3b-q8_0"],
+         "faux" => &["faux"],
+         _ => &[],
+     }
+@@ -195,6 +199,8 @@ fn normalize_provider_kind(provider: &str) -> String {
+         "anthropic" | "anthropic-api" | "anthropic_api" | "claude" => "anthropic_api".into(),
+         "openai" | "openai-codex" | "openai_codex" | "codex" => "openai_codex".into(),
+         "openrouter" | "open-router" | "open_router" => "openrouter".into(),
++        "vllm" | "vllm-openai" | "local-vllm" | "local_vllm" => "vllm".into(),
++        "ollama" | "local" => "ollama".into(),
+         "faux" => "faux".into(),
+         _ => lc,
+     }
+diff --git a/justfile b/justfile
+index 4a052094..0a4d03d7 100644
+--- a/justfile
++++ b/justfile
+@@ -29,14 +29,13 @@ check-quick:
+ # Exactly what CI runs: fmt-check + clippy + test, fail-fast in CI order (mirrors .github/workflows/ci.yml; fmt is check-only, never edits files). bead: mu-608b
+ ci: fmt-check clippy test
+ 
+-# Pre-PR cross-provider review gate (bead mu-6qst): run CI, then have a
+-# SEPARATE-provider model review the diff before a PR — a third check on top of
+-# CI and the human/agent. Local only (needs provider auth + network; not a CI
+-# step). Verdict comes from the reviewer's stdout, not its exit code. Reviewer
+-# defaults to ollama/qwen3-coder:30b (local, free, non-Claude); use codex with
+-# MU_REVIEW_PROVIDER=openai-codex MU_REVIEW_MODEL=gpt-5.5 when its OAuth is
+-# healthy. Disagree with a REJECT via MU_REVIEW_OVERRIDE=1. See scripts/ai-review.sh.
+-ci-aipr: ci
++# Pre-PR cross-provider review gate (bead mu-6qst): run the full PR checks
++# (fmt + clippy + tests + verify-claims), then have two independent reviewers
++# inspect the diff before a PR: one local Ollama model and one OpenRouter model.
++# Local only (needs provider auth + network; not a CI step). Verdict comes from
++# the reviewer's stdout, not its exit code. Disagree with a REJECT via
++# MU_REVIEW_OVERRIDE=1. See scripts/ai-review.sh.
++ci-aipr: check
+     scripts/ai-review.sh
+ 
+ # Trailing-PR sync of the canonical beads DB to .beads/issues.jsonl on main
+diff --git a/scripts/ai-review.sh b/scripts/ai-review.sh
+index 911edc34..a1a9fdee 100755
+--- a/scripts/ai-review.sh
++++ b/scripts/ai-review.sh
+@@ -6,11 +6,12 @@
+ # reviews green code.
+ #
+ # PANEL SHAPE (mu-f0ls): TWO primaries + a conditional TIEBREAKER.
+-#   Primary 1 (local):  qwen-rev (qwen3.6:35b-a3b-q8_0 @ num_ctx 262144, temp 0.6)
+-#                       over ollama — free, warm on the box, returns COMPLETE reviews.
+-#   Primary 2:          gpt-5.5 over openai-codex — the strong generalist.
+-#   Tiebreaker:         deepseek-v4-pro over openrouter — invoked ONLY when the
+-#                       two primaries disagree (consensus short-circuits it).
++#   Primary 1 (local):  qwen3-coder-next-agent262k over ollama — 3-GPU local
++#                       agentic/code reviewer, 262k context, temp 0.6.
++#   Primary 2:          deepseek-v4-pro over openrouter — frontier-ish and cheap.
++#   Tiebreaker:         Claude over anthropic-api — invoked ONLY when the two
++#                       primaries disagree, so the Anthropic key/cost is reserved
++#                       for actual ties.
+ #
+ # WHY THIS SHAPE: the previous panel ran two LOCAL models co-resident (qwen +
+ # gpt-oss:20b) and dead-ended a split at the operator. gpt-oss@49152 truncated its
+@@ -51,13 +52,13 @@
+ # Env:
+ #   Primary 1 (default ollama / qwen-rev):
+ #     MU_REVIEW_PROVIDER        provider (default: ollama)
+-#     MU_REVIEW_MODEL           model    (default: qwen-rev — baked qwen3.6:35b-a3b-q8_0@262144, temp 0.6)
+-#   Primary 2 (default openai-codex / gpt-5.5):
+-#     MU_REVIEW_PROVIDER_2      provider (default: openai-codex)
+-#     MU_REVIEW_MODEL_2         model    (default: gpt-5.5)
+-#   Tiebreaker (default openrouter / deepseek-v4-pro; runs ONLY on a split):
+-#     MU_REVIEW_PROVIDER_3      provider (default: openrouter)
+-#     MU_REVIEW_MODEL_3         model    (default: deepseek/deepseek-v4-pro)
++#     MU_REVIEW_MODEL           model    (default: qwen3-coder-next-agent262k)
++#   Primary 2 (default openrouter / deepseek-v4-pro):
++#     MU_REVIEW_PROVIDER_2      provider (default: openrouter)
++#     MU_REVIEW_MODEL_2         model    (default: deepseek/deepseek-v4-pro)
++#   Tiebreaker (default anthropic-api / claude-sonnet-4-6; runs ONLY on a split):
++#     MU_REVIEW_PROVIDER_3      provider (default: anthropic-api)
++#     MU_REVIEW_MODEL_3         model    (default: claude-sonnet-4-6)
+ #   Shared:
+ #     MU_REVIEW_TOOLS           reviewer tools, e.g. "read,grep" (default: none, single-shot)
+ #     MU_REVIEW_BASE            base ref to diff against (default: main)
+@@ -85,42 +86,22 @@ set -u
+ set -o pipefail
+ 
+ # Primary 1 is local ollama: free, reliable, a non-Claude opinion, warm on the box
+-# (24h keep-alive). It is the BAKED model qwen-rev (qwen3.6:35b-a3b-q8_0 @ num_ctx
+-# 262144, temp 0.6) from scripts/ollama/, NOT a base tag. WHY BAKED: mu talks to
+-# ollama over the Anthropic wire (mu-fmas) which sends NO num_ctx and NO sampling
+-# params (verified 2026-06-09: build_request_body is model/system/messages/tools/
+-# max_tokens only), so the model falls back to its baked defaults — baking is the
+-# only lever for both the window AND the sampling (memory a721c14d, 41771769).
++# (24h keep-alive). It is a BAKED model tag so mu can avoid per-request sampling
++# and context overrides on the Ollama/Anthropic wire. With the 3-GPU review host,
++# qwen3-coder-next-agent262k fits at 262144 context, temp 0.6 and leaves headroom;
++# it has been the stronger local AGENTIC/code-exploration lane than gpt-oss.
+ #
+-# WHY THE FULL 35b (not the shrunk 27b): with a SINGLE local primary the old
+-# co-residency squeeze is gone — qwen-rev gets the 48GB card to itself, so we run
+-# the full q8 35b (best local quality) at its full 262144 window. It fits: an
+-# SSM/attention HYBRID (full_attention_interval=4) keeps the KV cache ~1GB/64k, so
+-# 262144 costs only ~5GB over the 38GB weights → 43GB/100% GPU (terrain-verified
+-# 2026-06-09). temp 0.6 = Unsloth's precise-coding setting (NOT temp 0, which is
+-# off-distribution and degenerates — memory 41771769); a fixed seed gives the gate
+-# run-to-run reproducibility.
+-#
+-# WHY QWEN (not gpt-oss) FOR THE LOCAL SLOT: in our synthetic benchmarks gpt-oss:20b
+-# leads single-shot CODE review and qwen leads AGENTIC — so gpt-oss is the stronger
+-# pure code reviewer. BUT gpt-oss@49152 truncates its review before the VERDICT line
+-# on larger diffs, and a model that can't return a complete verdict contributes no
+-# signal regardless of its coding skill. Between "stronger coder that truncates" and
+-# "complete reviewer," the complete one takes the always-on local slot; gpt-5.5 and
+-# deepseek already supply aggressive code-level finding. gpt-oss keeps its Modelfile
+-# for the review-gate v2 per-file worker (one file fits in 49152), just not here.
+-# (gpt-oss:120b @ 65GB is a future single-local option once the box hits 72GB.)
+-#
+-# Primary 2 defaults to gpt-5.5 over openai-codex — the strong generalist. If its
+-# OAuth is unhealthy it returns no verdict (UNCLEAR) and the tiebreaker covers it.
+-# Tiebreaker is deepseek-v4-pro over openrouter, invoked only on a primary split.
++# Primary 2 defaults to deepseek-v4-pro over openrouter — frontier-ish, cheap,
++# and independent of the local runner. Tiebreaker is Claude over anthropic-api,
++# invoked only on a primary split so the Anthropic key/cost is used as the final
++# adjudicator, not the routine second opinion.
+ # Bench provenance: ~/src/public_github/code-review-bench/reports/NOTES.md.
+ PROVIDER="${MU_REVIEW_PROVIDER:-ollama}"
+-MODEL="${MU_REVIEW_MODEL:-qwen-rev}"
+-PROVIDER2="${MU_REVIEW_PROVIDER_2:-openai-codex}"
+-MODEL2="${MU_REVIEW_MODEL_2:-gpt-5.5}"
+-PROVIDER3="${MU_REVIEW_PROVIDER_3:-openrouter}"
+-MODEL3="${MU_REVIEW_MODEL_3:-deepseek/deepseek-v4-pro}"
++MODEL="${MU_REVIEW_MODEL:-qwen3-coder-next-agent262k}"
++PROVIDER2="${MU_REVIEW_PROVIDER_2:-openrouter}"
++MODEL2="${MU_REVIEW_MODEL_2:-deepseek/deepseek-v4-pro}"
++PROVIDER3="${MU_REVIEW_PROVIDER_3:-anthropic-api}"
++MODEL3="${MU_REVIEW_MODEL_3:-claude-sonnet-4-6}"
+ TOOLS="${MU_REVIEW_TOOLS:-}"   # empty = single-shot (default); e.g. "read,grep" lets the reviewer inspect surrounding code (slower, multi-turn)
+ BASE="${MU_REVIEW_BASE:-main}"
+ # Per-reviewer timeout: 2x a typical Claude response, with room for one ollama
+@@ -210,7 +191,14 @@ if [ -n "$TOOLS" ]; then
+ else
+   TOOL_CLAUSE="Review the diff exactly as given below — do NOT call any tools and do NOT emit any function-call or tool-call syntax; respond with prose only."
+ fi
+-PROMPT="You are a strict pre-PR code reviewer. The DIFF below shows exactly what changed; review ONLY that change for: correctness bugs; concurrency / lifecycle hazards (e.g. a held reference that blocks shutdown, a clone that outlives its owner); missing error handling; and safeguards that nearby code already applies but this diff omits. The FULL CONTENT of each changed file is included after the diff so you can see definitions, helpers, and guards that live OUTSIDE the changed hunks — a variable or function used in the diff is often defined there, so CHECK the full content before reporting anything as undefined/unset, and do NOT raise findings about unchanged code. $TOOL_CLAUSE Be concise and specific; cite file:line. Your reply's LAST line MUST be exactly 'VERDICT: APPROVE' or 'VERDICT: REJECT' (those literal words). List the most important findings first.
++PROMPT="You are a strict pre-PR code reviewer. The DIFF below shows exactly what changed; review ONLY that change for: correctness bugs; concurrency / lifecycle hazards (e.g. a held reference that blocks shutdown, a clone that outlives its owner); missing error handling; and safeguards that nearby code already applies but this diff omits. The FULL CONTENT of each changed file is included after the diff so you can see definitions, helpers, and guards that live OUTSIDE the changed hunks — a variable or function used in the diff is often defined there, so CHECK the full content before reporting anything as undefined/unset, and do NOT raise findings about unchanged code. $TOOL_CLAUSE
++
++Output contract:
++- Do not narrate your review process or repeat the prompt.
++- Report at most 5 findings; omit low-confidence concerns.
++- If there is no blocking correctness/security/lifecycle issue in this diff, say so briefly.
++- Keep the review under 1200 words.
++- Your reply's LAST line MUST be exactly 'VERDICT: APPROVE' or 'VERDICT: REJECT' (those literal words). Do not continue after the verdict line.
+ 
+ DIFF:
+ $DIFF

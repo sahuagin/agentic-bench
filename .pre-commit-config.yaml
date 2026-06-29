@@ -1,0 +1,17 @@
+# Hooks fired by jj-hooks (`jj-hp push`) via the prek runner.
+# pre-push gate: reject hardcoded env-specifics from reaching this PUBLIC repo.
+# The actual check is `scan-hardcoded` (a personal tool on PATH holding the
+# private patterns) — this config only names it, so nothing private lives here.
+# scan-hardcoded --gate self-skips private (forge) remotes, so the same config
+# is safe to copy into any repo.
+repos:
+  - repo: local
+    hooks:
+      - id: no-hardcoded-env
+        name: reject hardcoded env-specifics (public repos only)
+        entry: scan-hardcoded
+        args: ["--gate", "."]
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true

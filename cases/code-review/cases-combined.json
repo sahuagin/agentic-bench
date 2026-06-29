@@ -1,0 +1,744 @@
+[
+  {
+    "provenance": "reverse_fix",
+    "id": "pr265-approval-gate-unbounded-wait-reverse",
+    "language": "rust",
+    "title": "Remove the approval-gate timeout, re-introducing the unbounded-wait hang",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt. Do not claim to have run tests.",
+    "diff": "diff --git a/crates/mu-core/src/agent/loop_/execute_tools.rs b/crates/mu-core/src/agent/loop_/execute_tools.rs\n--- a/crates/mu-core/src/agent/loop_/execute_tools.rs\n+++ b/crates/mu-core/src/agent/loop_/execute_tools.rs\n@@ -28,17 +28,6 @@ const RETRY_STREAK_LIMIT: usize = 3;\n /// readability + uniqueness even across sessions.\n static ASK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);\n \n-/// Upper bound on how long the dispatch gate will wait for an approval\n-/// decision before failing closed. The approver lives across an unsecured\n-/// process boundary (remote frontend <-> daemon), so \"no response\" can be a\n-/// silent human OR a dropped channel - both resolve the same way: deny. A\n-/// turn must NEVER park forever on an approver that may not exist (that was\n-/// the MCP `code_index` wedge: unclassified -> Ask -> no solo approver ->\n-/// permanent hang).\n-const APPROVAL_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);\n-\n #[derive(Debug, Default)]\n pub(crate) struct ToolHistory {\n     pub(crate) entries: VecDeque<ToolHistoryEntry>,\n@@ -210,21 +199,6 @@ pub(crate) async fn handle_execute_tools(\n                         .await;\n                     let decision = tokio::select! {\n                         d = decision_rx => d.ok(),\n-                        _ = tokio::time::sleep(APPROVAL_GATE_TIMEOUT) => {\n-                            // No approver responded in time - fail closed.\n-                            // Drop the pending entry so a late responder\n-                            // can't fire a stale oneshot.\n-                            if let Ok(mut pending) = pending_approvals.lock() {\n-                                pending.remove(&request_id);\n-                            }\n-                            permission_refusal_reason = Some(format!(\n-                                \"tool `{}` required approval but no approver responded within \\\n-                                 {}s - denied (fail-closed).\",\n-                                call.name,\n-                                APPROVAL_GATE_TIMEOUT.as_secs()\n-                            ));\n-                            Some(ApprovalDecision::Deny)\n-                        }\n                         input_opt = input_rx.recv() => match input_opt {\n                             Some(AgentInput::Cancel) => {\n                                 if let Ok(mut pending) = pending_approvals.lock() {\n",
+    "expected_findings": [
+      {
+        "id": "approval-gate-unbounded-wait",
+        "severity": "blocker",
+        "file": "crates/mu-core/src/agent/loop_/execute_tools.rs",
+        "line": 200,
+        "keywords": [
+          "timeout",
+          "select",
+          "hang",
+          "approval",
+          "oneshot",
+          "fail-closed"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 265
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr265-approval-gate-unbounded-wait-synth",
+    "language": "rust",
+    "title": "Drop the approval-wait timeout arm, hanging the turn when no approver exists",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt. Do not claim to have run tests.",
+    "diff": "diff --git a/src/gate.rs b/src/gate.rs\n--- a/src/gate.rs\n+++ b/src/gate.rs\n@@ -1,25 +1,17 @@\n use tokio::sync::oneshot;\n-use std::time::Duration;\n-\n-/// Fail closed if no approver answers within this window.\n-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(180);\n \n pub enum Decision { Allow, Deny }\n \n /// Run a tool that needs human approval. The approver answers `decision_rx`.\n-/// In a headless session there is NO interactive approver, so `decision_rx`\n-/// is never resolved — the timeout is what guarantees this still terminates.\n+/// In a headless session there is NO interactive approver, so `decision_rx`\n+/// is never resolved.\n async fn run_gated(\n     tool: &str,\n     decision_rx: oneshot::Receiver<Decision>,\n ) -> Result<(), String> {\n     let decision = tokio::select! {\n         d = decision_rx => d.ok(),\n-        _ = tokio::time::sleep(APPROVAL_TIMEOUT) => {\n-            // No approver responded — deny (fail-closed).\n-            Some(Decision::Deny)\n-        }\n     };\n     match decision {\n         Some(Decision::Allow) => exec(tool).await,\n         Some(Decision::Deny) | None => Err(format!(\"{tool} denied\")),\n     }\n }\n",
+    "expected_findings": [
+      {
+        "id": "gate-oneshot-no-timeout",
+        "severity": "blocker",
+        "file": "src/gate.rs",
+        "line": 24,
+        "keywords": [
+          "timeout",
+          "select",
+          "hang",
+          "headless",
+          "oneshot",
+          "never resolved"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 265
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr273-overlay-take-leak-on-error-reverse",
+    "language": "rust",
+    "title": "Overlay modal taken out of self leaks when copy error is `?`-propagated past the restore",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-solo/src/app.rs b/crates/mu-solo/src/app.rs\n--- a/crates/mu-solo/src/app.rs\n+++ b/crates/mu-solo/src/app.rs\n@@ -1903,7 +1903,7 @@ impl App {\n     fn handle_overlay_key(&mut self, vp: &mut DynamicViewport, key: KeyEvent) -> Result<bool> {\n         let Some(mut overlay) = self.overlay.take() else {\n             return Ok(false);\n         };\n@@ -1917,16 +1917,8 @@ impl App {\n             (_, KeyCode::Char('c')) => {\n                 let text = overlay\n                     .lines\n                     .iter()\n                     .map(|l| {\n                         l.spans\n                             .iter()\n                             .map(|s| s.content.as_ref())\n                             .collect::<String>()\n                     })\n                     .collect::<Vec<_>>()\n                     .join(\"\\n\");\n-                // Don't `?` here: the overlay was taken out at the top of this\n-                // fn and is only restored at the bottom — propagating would leak\n-                // it (modal silently dies). Report the outcome via flash either\n-                // way and fall through to the restore.\n-                match copy_to_clipboard_or_file(text.trim(), self.clipboard_command.as_deref()) {\n-                    Ok(outcome) => {\n-                        self.set_flash(format!(\"\\u{2713} copied {} \\u{b7} {outcome}\", overlay.title))\n-                    }\n-                    Err(e) => self.set_flash(format!(\"copy failed: {e}\")),\n-                }\n+                let outcome =\n+                    copy_to_clipboard_or_file(text.trim(), self.clipboard_command.as_deref())?;\n+                self.set_flash(format!(\"\\u{2713} copied {} \\u{b7} {outcome}\", overlay.title));\n             }\n             (_, KeyCode::Up) | (KeyModifiers::ALT, KeyCode::Char('k')) => {\n                 overlay.scroll = overlay.scroll.saturating_sub(1);\n             }\n@@ -1957,6 +1949,6 @@ impl App {\n             (_, KeyCode::Home) => overlay.scroll = 0,\n             (_, KeyCode::End) => overlay.scroll = usize::MAX,\n             _ => {}\n         }\n         self.overlay = Some(overlay);\n         Ok(false)\n     }\n",
+    "expected_findings": [
+      {
+        "id": "overlay-leaked-on-copy-error",
+        "severity": "major",
+        "file": "crates/mu-solo/src/app.rs",
+        "line": 1933,
+        "keywords": [
+          "take",
+          "?",
+          "restore",
+          "overlay",
+          "early return",
+          "leak"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 273
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr273-take-restore-error-skip-synth",
+    "language": "rust",
+    "title": "State moved out of self with take() is dropped when an error is `?`-propagated before the restore",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/src/editor.rs b/src/editor.rs\n--- a/src/editor.rs\n+++ b/src/editor.rs\n@@ -10,17 +10,16 @@ impl Editor {\n     /// Handle a key while a modal is open. The modal is moved out of `self`\n     /// at the top and put back at the bottom so we can mutate it freely.\n     fn handle_modal_key(&mut self, key: Key) -> Result<()> {\n         let Some(mut modal) = self.modal.take() else {\n             return Ok(());\n         };\n         match key {\n             Key::Up => modal.scroll = modal.scroll.saturating_sub(1),\n             Key::Down => modal.scroll = modal.scroll.saturating_add(1),\n             // Copy the modal's text to the clipboard, then keep it open.\n-            Key::Copy => match copy_to_clipboard(&modal.text) {\n-                Ok(()) => self.flash = Some(\"copied\".into()),\n-                Err(e) => self.flash = Some(format!(\"copy failed: {e}\")),\n-            },\n+            Key::Copy => copy_to_clipboard(&modal.text)?,\n             _ => {}\n         }\n         // Restore the modal so it stays on screen.\n         self.modal = Some(modal);\n         Ok(())\n     }\n",
+    "expected_findings": [
+      {
+        "id": "modal-dropped-on-clipboard-error",
+        "severity": "major",
+        "file": "src/editor.rs",
+        "line": 24,
+        "keywords": [
+          "take",
+          "?",
+          "restore",
+          "modal",
+          "early return",
+          "dropped"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 273
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr276-tilde-not-expanded-reverse",
+    "language": "rust",
+    "title": "read tool stops expanding leading `~` and uses the literal path",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-coding/src/tools/read.rs b/crates/mu-coding/src/tools/read.rs\n--- a/crates/mu-coding/src/tools/read.rs\n+++ b/crates/mu-coding/src/tools/read.rs\n@@ -5,7 +5,6 @@ use std::pin::Pin;\n \n use tokio::sync::oneshot;\n \n-use crate::tools::path::expand_leading_tilde;\n use mu_core::agent::{Tool, ToolResult, ToolSpec};\n use serde_json::{json, Value};\n \n@@ -95,7 +94,7 @@ fn path_argument(arguments: &Value) -> Result<PathBuf, ToolResult> {\n     arguments\n         .get(\"path\")\n         .and_then(Value::as_str)\n-        .map(expand_leading_tilde)\n+        .map(PathBuf::from)\n         .ok_or_else(|| ToolResult {\n             content: \"missing required `path` argument\".to_owned(),\n             is_error: true,\n",
+    "expected_findings": [
+      {
+        "id": "tilde-not-expanded",
+        "severity": "major",
+        "file": "crates/mu-coding/src/tools/read.rs",
+        "line": 97,
+        "keywords": [
+          "tilde",
+          "expand",
+          "home",
+          "pathbuf",
+          "literal",
+          "~"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 276
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr276-tilde-not-expanded-synth",
+    "language": "rust",
+    "title": "file-open helper treats `~/...` as a literal path",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/src/open_config.rs b/src/open_config.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/open_config.rs\n@@ -0,0 +1,20 @@\n+use std::fs;\n+use std::io;\n+use std::path::PathBuf;\n+\n+/// Resolve a user-supplied config path and read it.\n+/// Callers may pass shell shorthand like `~/.config/app.toml`.\n+fn resolve_path(input: &str) -> PathBuf {\n+    PathBuf::from(input)\n+}\n+\n+pub fn read_config(input: &str) -> io::Result<String> {\n+    let path = resolve_path(input);\n+    fs::read_to_string(&path)\n+}\n+\n+#[test]\n+fn reads_home_config() {\n+    // Passing \"~/.config/app.toml\" should read $HOME/.config/app.toml.\n+    let _ = read_config(\"~/.config/app.toml\");\n+}\n",
+    "expected_findings": [
+      {
+        "id": "tilde-not-expanded-synth",
+        "severity": "major",
+        "file": "src/open_config.rs",
+        "line": 8,
+        "keywords": [
+          "tilde",
+          "expand",
+          "home",
+          "literal",
+          "~",
+          "shell"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 276
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr277-stale-binary-pref-reverse",
+    "language": "bash",
+    "title": "ai-review.sh prefers stale release binary over the freshly-built debug binary",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/scripts/ai-review.sh b/scripts/ai-review.sh\n--- a/scripts/ai-review.sh\n+++ b/scripts/ai-review.sh\n@@ -221,12 +221,9 @@ fi\n \n # --- reviewer client = freshly-built mu, never the (possibly stale) installed one\n-# Prefer the DEBUG binary: it is the one the build line above just\n-# refreshed. Preferring release here once handed the panel a weeks-old\n-# release build that lacked a flag the script passed — every reviewer\n-# died at clap with UNCLEAR (2026-06-11). Release is only a fallback.\n cargo build --bin mu -q 2>/dev/null || true\n-if   [ -x ./target/debug/mu ];   then MU=./target/debug/mu\n-elif [ -x ./target/release/mu ]; then MU=./target/release/mu\n+if   [ -x ./target/release/mu ]; then MU=./target/release/mu\n+elif [ -x ./target/debug/mu ];   then MU=./target/debug/mu\n else MU=\"$(command -v mu || true)\"; fi\n [ -n \"${MU:-}\" ] || { echo \"${C_RED}ai-review: no mu binary found${C_OFF}\" >&2; exit 2; }\n",
+    "expected_findings": [
+      {
+        "id": "stale-release-binary-preferred",
+        "severity": "major",
+        "file": "scripts/ai-review.sh",
+        "line": 225,
+        "keywords": [
+          "release",
+          "debug",
+          "stale",
+          "cargo build",
+          "fallback"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "shellcheck passes",
+      "verified"
+    ],
+    "source_pr": 277
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr277-stale-binary-pref-synth",
+    "language": "bash",
+    "title": "Script rebuilds the debug artifact but runs the possibly-stale release one",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/run-tool.sh b/run-tool.sh\nnew file mode 100755\n--- /dev/null\n+++ b/run-tool.sh\n@@ -0,0 +1,16 @@\n+#!/usr/bin/env bash\n+set -euo pipefail\n+\n+# Build a fresh DEBUG binary so we always test the current source,\n+# then invoke it with the brand-new --json flag.\n+cargo build --bin tool >/dev/null 2>&1 || true\n+\n+# Pick the binary to run.\n+if   [ -x ./target/release/tool ]; then BIN=./target/release/tool\n+elif [ -x ./target/debug/tool ];   then BIN=./target/debug/tool\n+else BIN=\"$(command -v tool)\"; fi\n+\n+# --json was added today; an older cached release build lacks it and\n+# will abort at argument parsing.\n+exec \"$BIN\" --json \"$@\"\n",
+    "expected_findings": [
+      {
+        "id": "prefers-stale-release-over-fresh-debug",
+        "severity": "major",
+        "file": "run-tool.sh",
+        "line": 9,
+        "keywords": [
+          "release",
+          "debug",
+          "stale",
+          "build",
+          "prefer"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "shellcheck passes",
+      "verified"
+    ],
+    "source_pr": 277
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr278-temp-name-nanos-collision-reverse",
+    "language": "rust",
+    "title": "Snapshot save temp name uses pid+nanos nonce that collides across same-process threads",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt. Do not claim to have run tests.",
+    "diff": "diff --git a/crates/t4c/src/snapshot.rs b/crates/t4c/src/snapshot.rs\n--- a/crates/t4c/src/snapshot.rs\n+++ b/crates/t4c/src/snapshot.rs\n@@ -155,11 +155,12 @@ impl Snapshot {\n         let bytes =\n             rkyv::to_bytes::<rkyv::rancor::Error>(self).context(\"rkyv-serializing snapshot\")?;\n         // Unique temp name per writer (pid + nanos) so two concurrent `discover`\n         // processes targeting the same snapshot don't clobber a shared temp file\n         // — each writes its own temp, then atomically renames into place. The\n         // rename is the commit point; last writer wins cleanly, no torn file.\n-        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n-        let nonce = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);\n+        let nonce = std::time::SystemTime::now()\n+            .duration_since(std::time::UNIX_EPOCH)\n+            .map(|d| d.as_nanos())\n+            .unwrap_or(0);\n         let tmp = path.with_extension(format!(\"rkyv.tmp.{}.{nonce}\", std::process::id()));\n         std::fs::write(&tmp, &bytes)\n             .with_context(|| format!(\"writing snapshot tmp {}\", tmp.display()))?;\n         // Best-effort cleanup of our own temp if the rename fails (e.g. cross-dev).\n         if let Err(e) = std::fs::rename(&tmp, path) {\n",
+    "expected_findings": [
+      {
+        "id": "nanos-nonce-not-unique-across-threads",
+        "severity": "major",
+        "file": "crates/t4c/src/snapshot.rs",
+        "line": 159,
+        "keywords": [
+          "nanos",
+          "pid",
+          "collide",
+          "thread",
+          "rename",
+          "concurrent"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified the fix"
+    ],
+    "source_pr": 278
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr278-temp-name-nanos-collision-synth",
+    "language": "rust",
+    "title": "Atomic write-then-rename uses pid+timestamp temp name that races across threads",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt. Do not claim to have run tests.",
+    "diff": "diff --git a/src/atomic_store.rs b/src/atomic_store.rs\n--- a/src/atomic_store.rs\n+++ b/src/atomic_store.rs\n@@ -0,0 +1,22 @@\n+use std::fs;\n+use std::io;\n+use std::path::Path;\n+use std::time::{SystemTime, UNIX_EPOCH};\n+\n+/// Atomically write `bytes` to `path`: write a per-writer temp file, then rename\n+/// it into place so a concurrent reader never sees a half-written file. Many\n+/// threads in this process may call `store` for the same `path` at once.\n+pub fn store(path: &Path, bytes: &[u8]) -> io::Result<()> {\n+    // Unique temp name per writer so concurrent writers don't clobber a shared\n+    // temp file before the rename commits it.\n+    let nonce = SystemTime::now()\n+        .duration_since(UNIX_EPOCH)\n+        .map(|d| d.as_nanos())\n+        .unwrap_or(0);\n+    let pid = std::process::id();\n+    let tmp = path.with_extension(format!(\"tmp.{pid}.{nonce}\"));\n+    fs::write(&tmp, bytes)?;\n+    // Rename is the commit point.\n+    fs::rename(&tmp, path)?;\n+    Ok(())\n+}\n",
+    "expected_findings": [
+      {
+        "id": "pid-timestamp-temp-name-races-across-threads",
+        "severity": "major",
+        "file": "src/atomic_store.rs",
+        "line": 17,
+        "keywords": [
+          "nonce",
+          "timestamp",
+          "pid",
+          "thread",
+          "collide",
+          "rename"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 278
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr280-tool-future-panic-kills-loop-reverse",
+    "language": "rust",
+    "title": "Tool future awaited in loop task without catch_unwind (panic wedges the session)",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-core/src/agent/loop_/execute_tools.rs b/crates/mu-core/src/agent/loop_/execute_tools.rs\n--- a/crates/mu-core/src/agent/loop_/execute_tools.rs\n+++ b/crates/mu-core/src/agent/loop_/execute_tools.rs\n@@ -416,30 +416,8 @@ pub(crate) async fn handle_execute_tools(\n             match tool {\n                 Some(t) => {\n                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();\n-                    // mu-mu-solo-loop-terminate-5ek5: tool futures are\n-                    // awaited IN the loop task, so before this wrap a\n-                    // panicking tool unwound the whole agent loop —\n-                    // the input channel closed and every later ask\n-                    // got \"session loop has terminated\" (the 2026-06-07\n-                    // incident class). spawn_blocking-based tools were\n-                    // already isolated (panic → JoinError → error\n-                    // result); this extends the same contract to the\n-                    // async path: a panic is an is_error ToolResult,\n-                    // never a loop-killing condition.\n-                    use futures::FutureExt as _;\n-                    let tool_name_for_panic = call.name.clone();\n-                    let mut execute_fut = Box::pin(\n-                        std::panic::AssertUnwindSafe(\n-                            t.execute(call.arguments.clone().into(), cancel_rx),\n-                        )\n-                        .catch_unwind()\n-                        .map(move |res| {\n-                            res.unwrap_or_else(|panic| ToolResult {\n-                                content: format!(\n-                                    \"tool `{tool_name_for_panic}` panicked: {}\",\n-                                    panic_message(panic.as_ref())\n-                                ),\n-                                is_error: true,\n-                            })\n-                        }),\n-                    );\n+                    let mut execute_fut =\n+                        Box::pin(t.execute(call.arguments.clone().into(), cancel_rx));\n \n                     let tool_call_started_at = Instant::now();\n                     let tool_state_started_unix_ms = now_unix_ms();\n                     let mut tool_tick =\n                         tokio::time::interval(std::time::Duration::from_millis(1000));\n                     tool_tick.tick().await;\n \n                     let mut input_drained_local = false;\n                     loop {\n                         tokio::select! {\n                             result = &mut execute_fut => break result,\n",
+    "expected_findings": [
+      {
+        "id": "tool-future-panic-not-isolated",
+        "severity": "blocker",
+        "file": "crates/mu-core/src/agent/loop_/execute_tools.rs",
+        "line": 419,
+        "keywords": [
+          "panic",
+          "catch_unwind",
+          "loop",
+          "tool",
+          "unwind",
+          "wedge"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 280
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr280-handler-panic-kills-loop-synth",
+    "language": "rust",
+    "title": "Request handler future awaited inside the event loop with no panic isolation",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/src/worker_loop.rs b/src/worker_loop.rs\n--- a/src/worker_loop.rs\n+++ b/src/worker_loop.rs\n@@ -1,0 +1,28 @@\n+use tokio::sync::mpsc;\n+\n+pub struct Request {\n+    pub id: u64,\n+    pub payload: String,\n+}\n+\n+pub struct Reply {\n+    pub id: u64,\n+    pub body: String,\n+    pub is_error: bool,\n+}\n+\n+/// Single-task worker loop: it owns `rx` and is the ONLY consumer of\n+/// incoming requests. Each request's handler future is awaited right\n+/// here in the loop task.\n+pub async fn run(\n+    mut rx: mpsc::Receiver<Request>,\n+    replies: mpsc::Sender<Reply>,\n+    handle: impl Fn(Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Reply> + Send>>,\n+) {\n+    while let Some(req) = rx.recv().await {\n+        // handle(req) may panic (bad input, handler bug). The future is\n+        // awaited inline, so a panic unwinds `run`, drops `rx`, and the\n+        // sender half is closed forever — every later request silently\n+        // goes nowhere.\n+        let reply = handle(req).await;\n+        let _ = replies.send(reply).await;\n+    }\n+}\n",
+    "expected_findings": [
+      {
+        "id": "handler-panic-kills-worker-loop",
+        "severity": "blocker",
+        "file": "src/worker_loop.rs",
+        "line": 25,
+        "keywords": [
+          "panic",
+          "catch_unwind",
+          "loop",
+          "unwind",
+          "channel",
+          "wedge"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 280
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr282-append-order-lock-reverse",
+    "language": "rust",
+    "title": "SessionEventLog::append reserves id outside the disk-writer lock, racing the ordered command-append path",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-core/src/event_log.rs b/crates/mu-core/src/event_log.rs\n--- a/crates/mu-core/src/event_log.rs\n+++ b/crates/mu-core/src/event_log.rs\n@@ -861,21 +861,6 @@ impl SessionEventLog {\n     pub fn append_with_parents(\n         &self,\n         actor: EventActor,\n         payload: EventPayload,\n         parent_event_ids: Vec<u64>,\n     ) -> u64 {\n-        // mu-kgpg: this mutex is also the append-order mutex.  Both\n-        // best-effort appends and strict command appends hold it from\n-        // id assignment through disk projection and in-memory push, so\n-        // file order, event id order, and snapshot order cannot drift\n-        // across the two append paths.\n-        let mut disk_guard = match self.disk_writer.lock() {\n-            Ok(guard) => guard,\n-            Err(poisoned) => {\n-                tracing::warn!(\n-                    session_id = %self.session_id,\n-                    \"disk writer mutex poisoned; recovering for best-effort append\"\n-                );\n-                poisoned.into_inner()\n-            }\n-        };\n         let id = self.next_id.fetch_add(1, Ordering::Relaxed);\n         let event = SessionEvent {\n             id,\n             session_id: self.session_id.clone(),\n             parent_event_ids,\n             timestamp_unix_ms: now_unix_ms(),\n             actor,\n             payload,\n         };\n@@ -891,26 +876,7 @@ impl SessionEventLog {\n         // mu-upb: best-effort JSONL write before the in-memory push\n         // so the disk record is at least as complete as memory. IO\n         // failures are logged and ignored — disk persistence is not\n         // load-bearing for the running daemon.\n-        if let Some(file) = disk_guard.as_mut() {\n-            match serde_json::to_string(&event) {\n-                Ok(line) => {\n-                    if let Err(e) = writeln!(file, \"{line}\") {\n-                        tracing::warn!(\n-                            session_id = %self.session_id,\n-                            error = %e,\n-                            \"disk write failed; continuing in-memory only\"\n-                        );\n-                    }\n-                }\n-                Err(e) => {\n-                    tracing::warn!(\n-                        session_id = %self.session_id,\n-                        error = %e,\n-                        \"event serialization failed for disk write\"\n-                    );\n-                }\n-            }\n-        }\n+        self.write_to_disk(&event);\n         if let Ok(mut events) = self.events.lock() {\n             events.push(event);\n         } else {\n@@ -870,6 +836,33 @@ impl SessionEventLog {\n             .unwrap_or(false)\n     }\n \n+    fn write_to_disk(&self, event: &SessionEvent) {\n+        let Ok(mut guard) = self.disk_writer.lock() else {\n+            return;\n+        };\n+        let Some(file) = guard.as_mut() else {\n+            return;\n+        };\n+        match serde_json::to_string(event) {\n+            Ok(line) => {\n+                if let Err(e) = writeln!(file, \"{line}\") {\n+                    tracing::warn!(\n+                        session_id = %self.session_id,\n+                        error = %e,\n+                        \"disk write failed; continuing in-memory only\"\n+                    );\n+                }\n+            }\n+            Err(e) => {\n+                tracing::warn!(\n+                    session_id = %self.session_id,\n+                    error = %e,\n+                    \"event serialization failed for disk write\"\n+                );\n+            }\n+        }\n+    }\n+\n     /// Snapshot the log. Clones the inner vec — safe to read without\n     /// holding the lock.\n     pub fn snapshot(&self) -> Vec<SessionEvent> {\n",
+    "expected_findings": [
+      {
+        "id": "append-id-assigned-outside-lock-races-ordering",
+        "severity": "major",
+        "file": "crates/mu-core/src/event_log.rs",
+        "line": 882,
+        "keywords": [
+          "ordering",
+          "race",
+          "lock",
+          "append",
+          "id",
+          "concurrent"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 282
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr282-append-order-lock-synth",
+    "language": "go",
+    "title": "Append-only log reserves sequence id outside the mutex, so disk/slice order can drift from id order",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/eventlog/eventlog.go b/eventlog/eventlog.go\nnew file mode 100644\n--- /dev/null\n+++ b/eventlog/eventlog.go\n@@ -0,0 +1,44 @@\n+package eventlog\n+\n+import (\n+\t\"fmt\"\n+\t\"os\"\n+\t\"sync\"\n+\t\"sync/atomic\"\n+)\n+\n+// Log is an append-only event log mirrored to a JSONL-ish file. Each\n+// record gets a monotonic id; consumers replay the file and the\n+// in-memory slice and assume both are sorted by id.\n+type Log struct {\n+\tmu     sync.Mutex\n+\tnextID atomic.Uint64\n+\tfile   *os.File\n+\tevents []string\n+}\n+\n+// AppendCommand is the strict path: it holds mu across id assignment,\n+// the disk write, and the in-memory push, so file order and slice\n+// order always match id order.\n+func (l *Log) AppendCommand(payload string) uint64 {\n+\tl.mu.Lock()\n+\tdefer l.mu.Unlock()\n+\tid := l.nextID.Add(1)\n+\tline := fmt.Sprintf(\"%d:%s\\n\", id, payload)\n+\t_, _ = l.file.WriteString(line)\n+\tl.events = append(l.events, line)\n+\treturn id\n+}\n+\n+// Append is the best-effort path. It reserves an id WITHOUT the lock,\n+// then takes the lock separately to write and push.\n+func (l *Log) Append(payload string) uint64 {\n+\tid := l.nextID.Add(1)\n+\tline := fmt.Sprintf(\"%d:%s\\n\", id, payload)\n+\tl.mu.Lock()\n+\t_, _ = l.file.WriteString(line)\n+\tl.events = append(l.events, line)\n+\tl.mu.Unlock()\n+\treturn id\n+}\n",
+    "expected_findings": [
+      {
+        "id": "append-seq-reserved-before-lock-order-drift",
+        "severity": "major",
+        "file": "eventlog/eventlog.go",
+        "line": 39,
+        "keywords": [
+          "race",
+          "ordering",
+          "lock",
+          "atomic",
+          "append",
+          "concurrent"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "go test",
+      "verified"
+    ],
+    "source_pr": 282
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr286-context-window-none-fallback-reverse",
+    "language": "rust",
+    "title": "Context pressure only set when a hardware window is known (None falls through silently)",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-coding/src/serve/forwarder.rs b/crates/mu-coding/src/serve/forwarder.rs\n--- a/crates/mu-coding/src/serve/forwarder.rs\n+++ b/crates/mu-coding/src/serve/forwarder.rs\n@@ -463,15 +463,11 @@ fn compute_status(\n     // Context pressure from the last model call's total input tokens.\n     if let Some(last_input) = last_call_input {\n         status.last_call_context_tokens = Some(last_input);\n-        let window = context_window_for(&provider_kind, &model)\n-            .unwrap_or(mu_core::agent::DEFAULT_COMPACTION_THRESHOLD as u64);\n-        status.context_window_size = Some(window);\n-        status.context_pressure_pct = Some((last_input as f64 / window as f64) * 100.0);\n+        let window = context_window_for(&provider_kind, &model);\n+        if let Some(w) = window {\n+            status.context_window_size = Some(w);\n+            status.context_pressure_pct = Some((last_input as f64 / w as f64) * 100.0);\n+        }\n     }\n \n     status\n",
+    "expected_findings": [
+      {
+        "id": "missing-window-fallback",
+        "severity": "minor",
+        "file": "crates/mu-coding/src/serve/forwarder.rs",
+        "line": 466,
+        "keywords": [
+          "fallback",
+          "none",
+          "context",
+          "window",
+          "blank",
+          "ollama"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 286
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr286-context-window-none-fallback-synth",
+    "language": "rust",
+    "title": "Pressure gauge field left unset when capacity lookup misses",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/src/disk_status.rs b/src/disk_status.rs\n--- a/src/disk_status.rs\n+++ b/src/disk_status.rs\n@@ -10,12 +10,16 @@ struct DiskStatus {\n     used_bytes: u64,\n     capacity_bytes: Option<u64>,\n     usage_pct: Option<f64>,\n }\n \n+const DEFAULT_QUOTA_BYTES: u64 = 100_000_000_000;\n+\n fn compute_disk_status(mount: &Mount, used: u64) -> DiskStatus {\n     let mut status = DiskStatus::default();\n     status.used_bytes = used;\n-    // capacity_for() returns None for network/overlay mounts not in the table.\n-    if let Some(cap) = capacity_for(mount) {\n-        status.capacity_bytes = Some(cap);\n-        status.usage_pct = Some((used as f64 / cap as f64) * 100.0);\n-    }\n+    // capacity_for() returns None for network/overlay mounts not in the\n+    // table; fall back to the default quota so the gauge is never blank.\n+    let cap = capacity_for(mount);\n+    if let Some(c) = cap {\n+        status.capacity_bytes = Some(c);\n+        status.usage_pct = Some((used as f64 / c as f64) * 100.0);\n+    }\n     status\n }\n",
+    "expected_findings": [
+      {
+        "id": "synth-missing-quota-fallback",
+        "severity": "minor",
+        "file": "src/disk_status.rs",
+        "line": 22,
+        "keywords": [
+          "fallback",
+          "none",
+          "capacity",
+          "usage_pct",
+          "blank",
+          "default"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 286
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr287-ollama-preflight-reverse",
+    "language": "bash",
+    "title": "ai-review.sh drops the /api/ps pre-flight and blindly targets the configured ollama model",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/scripts/ai-review.sh b/scripts/ai-review.sh\n--- a/scripts/ai-review.sh\n+++ b/scripts/ai-review.sh\n@@ -255,37 +255,7 @@ if   [ -x ./target/debug/mu ];   then MU=./target/debug/mu\n elif [ -x ./target/release/mu ]; then MU=./target/release/mu\n else MU=\"$(command -v mu || true)\"; fi\n [ -n \"${MU:-}\" ] || { echo \"${C_RED}ai-review: no mu binary found${C_OFF}\" >&2; exit 2; }\n \n-# ── Local-reviewer pre-flight: never trigger an ollama model reload ─────────\n-# The local ollama reviewer (primary-1 in single-shot, the per-commit leaf in\n-# chunked) reads $PROVIDER/$MODEL — so resolving them here covers both modes.\n-# A cold load of the 262k reviewer is minutes, and that reload has SIGTERM'd\n-# reviewers mid-stream before (see the MU_REVIEW_TIMEOUT note above). So decide\n-# from ollama's /api/ps what's actually resident:\n-#   - same model already loaded  -> run local (no delay)\n-#   - box reachable but empty     -> run local (a load evicts nobody)\n-#   - a DIFFERENT model loaded    -> fall back (don't evict it / eat the reload)\n-#   - ollama unreachable          -> fall back (can't run local against a dead box)\n-# Match is tag-tolerant (ollama reports ':latest'). Synthesis (SYNTH_*) is\n-# hosted by default and is not checked here.\n-ensure_local_reviewer_loaded() {\n-  [ \"$PROVIDER\" = ollama ] || return 0\n-  local base want body loaded shown\n-  base=\"${OLLAMA_API_BASE:-http://<ollama-host>}\"\n-  want=\"$MODEL\"; case \"$want\" in *:*) : ;; *) want=\"$want:latest\" ;; esac\n-  if ! body=\"$(curl -s --max-time 5 \"$base/api/ps\" 2>/dev/null)\"; then\n-    echo \"${C_DIM}ai-review: ollama unreachable at $base; primary-1 -> $FALLBACK_PROVIDER/$FALLBACK_MODEL.${C_OFF}\" >&2\n-    PROVIDER=\"$FALLBACK_PROVIDER\"; MODEL=\"$FALLBACK_MODEL\"; return 0\n-  fi\n-  loaded=\"$(printf '%s' \"$body\" | grep -o '\"name\":\"[^\"]*\"' | sed 's/^\"name\":\"//; s/\"$//')\"\n-  [ -z \"$loaded\" ] && return 0                      # reachable + empty -> safe load\n-  printf '%s\\n' \"$loaded\" | grep -qxF \"$want\" && return 0   # same model resident\n-  shown=\"${loaded//$'\\n'/, }\"\n-  echo \"${C_DIM}ai-review: ollama has a different model resident at $base (loaded: $shown); primary-1 -> $FALLBACK_PROVIDER/$FALLBACK_MODEL to avoid an eviction/reload.${C_OFF}\" >&2\n-  PROVIDER=\"$FALLBACK_PROVIDER\"; MODEL=\"$FALLBACK_MODEL\"\n-}\n-ensure_local_reviewer_loaded\n-\n if [ -n \"$TOOLS\" ]; then\n   TOOL_CLAUSE=\"Use the read and grep tools to inspect surrounding code when a judgement needs it.\"\n else\n",
+    "expected_findings": [
+      {
+        "id": "removed-ollama-preflight",
+        "severity": "major",
+        "file": "scripts/ai-review.sh",
+        "line": 258,
+        "keywords": [
+          "pre-flight",
+          "ollama",
+          "eviction",
+          "reload",
+          "fallback",
+          "resident"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "bash -n clean",
+      "verified against the live box"
+    ],
+    "source_pr": 287
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr287-blind-model-load-synth",
+    "language": "bash",
+    "title": "Reviewer launcher requests its model without checking what is resident, forcing an eviction with no fallback",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/scripts/run-reviewer.sh b/scripts/run-reviewer.sh\nnew file mode 100755\n--- /dev/null\n+++ b/scripts/run-reviewer.sh\n@@ -0,0 +1,19 @@\n+#!/usr/bin/env bash\n+set -euo pipefail\n+\n+# Run the local CI reviewer against the ollama box.\n+OLLAMA=\"${OLLAMA_API_BASE:-http://<ollama-host>}\"\n+MODEL=\"${REVIEW_MODEL:-qwen3-coder:30b}\"\n+FALLBACK=\"${REVIEW_FALLBACK:-openai/gpt-5.5}\"\n+DIFF_FILE=\"$1\"\n+\n+run_reviewer() {\n+  # Send the diff to the configured model. ollama keeps at most one model\n+  # resident; requesting a model that is not the loaded one cold-loads it\n+  # (minutes for a big reviewer) and SIGTERMs whatever was streaming.\n+  curl -s \"$OLLAMA/api/generate\" \\\n+    -d \"{\\\"model\\\":\\\"$MODEL\\\",\\\"prompt\\\":$(jq -Rs . < \"$DIFF_FILE\")}\"\n+}\n+\n+# Always run locally with the configured model.\n+run_reviewer\n",
+    "expected_findings": [
+      {
+        "id": "no-resident-check-no-fallback",
+        "severity": "major",
+        "file": "scripts/run-reviewer.sh",
+        "line": 20,
+        "keywords": [
+          "resident",
+          "preflight",
+          "api/ps",
+          "eviction",
+          "fallback",
+          "reload"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "shellcheck clean",
+      "verified"
+    ],
+    "source_pr": 287
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr312-legacy-thinking-wire-shape-reverse",
+    "language": "rust",
+    "title": "Anthropic apply_thinking sends removed `type:enabled`+budget_tokens shape (400, empty reasoning)",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-ai/src/providers/anthropic.rs b/crates/mu-ai/src/providers/anthropic.rs\n--- a/crates/mu-ai/src/providers/anthropic.rs\n+++ b/crates/mu-ai/src/providers/anthropic.rs\n@@ -386,21 +386,24 @@ fn map_agent_message_single(m: &AgentMessage) -> Option<AnthMessage> {\n /// Inject the extended-thinking directive into an already-built request body.\n /// `None` is a no-op (the body keeps its no-`thinking` shape — this is why the\n /// byte-parity tests still pass).\n fn apply_thinking(body: &mut Value, effort: Option<&str>) {\n     let Some(level) = effort else {\n         return;\n     };\n-    body[\"thinking\"] = serde_json::json!({ \"type\": \"adaptive\", \"display\": \"summarized\" });\n-    if let Some(obj) = body.as_object_mut() {\n-        let oc = obj\n-            .entry(\"output_config\")\n-            .or_insert_with(|| serde_json::json!({}));\n-        oc[\"effort\"] = Value::from(level);\n-    }\n+    let budget_tokens: u32 = match level {\n+        \"low\" => 4096,\n+        \"medium\" => 10_240,\n+        \"high\" => 24_576,\n+        \"xhigh\" => 32_000,\n+        _ => 10_240,\n+    };\n+    body[\"thinking\"] = serde_json::json!({\n+        \"type\": \"enabled\",\n+        \"budget_tokens\": budget_tokens,\n+    });\n }\n",
+    "expected_findings": [
+      {
+        "id": "legacy-enabled-thinking-shape",
+        "severity": "major",
+        "file": "crates/mu-ai/src/providers/anthropic.rs",
+        "line": 401,
+        "keywords": [
+          "thinking",
+          "enabled",
+          "budget_tokens",
+          "adaptive",
+          "display",
+          "400"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "cargo test",
+      "tests pass",
+      "i ran",
+      "verified"
+    ],
+    "source_pr": 312
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr312-legacy-thinking-wire-shape-synth",
+    "language": "python",
+    "title": "Request builder uses deprecated `type:enabled` thinking field and omits the display flag",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/llm/request.py b/llm/request.py\n--- a/llm/request.py\n+++ b/llm/request.py\n@@ -1,9 +1,22 @@\n # Effort -> token budget used by the legacy thinking API.\n EFFORT_BUDGET = {\"low\": 4096, \"medium\": 10240, \"high\": 24576}\n \n \n def build_request(model: str, messages: list, effort: str | None) -> dict:\n     body = {\"model\": model, \"messages\": messages, \"max_tokens\": 4096}\n+    if effort is not None:\n+        # Turn on extended thinking for this request.\n+        budget = EFFORT_BUDGET.get(effort, EFFORT_BUDGET[\"medium\"])\n+        body[\"thinking\"] = {\"type\": \"enabled\", \"budget_tokens\": budget}\n     return body\n",
+    "expected_findings": [
+      {
+        "id": "deprecated-thinking-enabled-shape",
+        "severity": "major",
+        "file": "llm/request.py",
+        "line": 12,
+        "keywords": [
+          "thinking",
+          "enabled",
+          "budget_tokens",
+          "display",
+          "summarized",
+          "deprecated"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "pytest",
+      "tests pass",
+      "i ran",
+      "verified"
+    ],
+    "source_pr": 312
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr319-silent-config-drop-reverse",
+    "language": "rust",
+    "title": "Config deserialization failure swallowed by a quiet WARN, silently degrading to all-defaults",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-core/src/config.rs b/crates/mu-core/src/config.rs\n--- a/crates/mu-core/src/config.rs\n+++ b/crates/mu-core/src/config.rs\n@@ -763,15 +763,9 @@ impl Config {\n         match merged.try_into::<Config>() {\n             Ok(c) => (c, sources),\n             Err(e) => {\n-                // The whole merged config is schema-invalid — almost always one\n-                // unknown/renamed field (deny_unknown_fields rejects the ENTIRE\n-                // file). Catastrophic: every setting the operator wrote, every\n-                // MCP server, is discarded. This is the case that silently hid\n-                // a broken config behind a single WARN (at-loud-config).\n-                loud_config_drop(\n-                    \"mu config failed to load — your ENTIRE config was IGNORED\",\n-                    &e.to_string(),\n-                    \"the entire config\",\n+                tracing::warn!(\n+                    error = %e,\n+                    \"merged mu config failed deserialization; falling back to all-defaults\",\n                 );\n                 // The files did NOT contribute to the effective config\n                 // — provenance must say so.\n                 (Config::default(), vec![\"defaults\".to_string()])\n             }\n         }\n     }\n",
+    "expected_findings": [
+      {
+        "id": "silent-config-discard",
+        "severity": "major",
+        "file": "crates/mu-core/src/config.rs",
+        "line": 766,
+        "keywords": [
+          "silent",
+          "warn",
+          "defaults",
+          "discard",
+          "config",
+          "deny_unknown_fields"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 319
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr319-silent-config-drop-synth",
+    "language": "rust",
+    "title": "Loader swallows the deserialize error and silently returns defaults on a malformed operator config",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/src/settings.rs b/src/settings.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/settings.rs\n@@ -0,0 +1,28 @@\n+use serde::Deserialize;\n+\n+#[derive(Debug, Default, Deserialize)]\n+#[serde(deny_unknown_fields)]\n+pub struct Settings {\n+    pub max_workers: u32,\n+    pub endpoint: String,\n+    pub servers: Vec<String>,\n+}\n+\n+/// Load operator settings from a TOML file the user wrote by hand.\n+/// On any failure we fall back to built-in defaults so the daemon\n+/// always boots.\n+pub fn load_settings(path: &str) -> Settings {\n+    let text = match std::fs::read_to_string(path) {\n+        Ok(t) => t,\n+        Err(_) => return Settings::default(),\n+    };\n+    match toml::from_str::<Settings>(&text) {\n+        Ok(s) => s,\n+        Err(e) => {\n+            // One unknown/renamed field makes deny_unknown_fields reject the\n+            // whole file — but just note it and carry on with defaults.\n+            log::debug!(\"settings parse failed: {e}\");\n+            Settings::default()\n+        }\n+    }\n+}\n",
+    "expected_findings": [
+      {
+        "id": "swallowed-parse-error-defaults",
+        "severity": "major",
+        "file": "src/settings.rs",
+        "line": 22,
+        "keywords": [
+          "swallow",
+          "silent",
+          "debug",
+          "defaults",
+          "deny_unknown_fields",
+          "error"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 319
+  },
+  {
+    "provenance": "reverse_fix",
+    "id": "pr331-placeholder-context-compaction-reverse",
+    "language": "rust",
+    "title": "Discovered ollama models get a fabricated 32k context placeholder that drives compaction every turn",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/crates/mu-core/src/route_catalog.rs b/crates/mu-core/src/route_catalog.rs\n--- a/crates/mu-core/src/route_catalog.rs\n+++ b/crates/mu-core/src/route_catalog.rs\n@@ -148,6 +148,11 @@ impl RouteCatalog {\n     /// via `mu_ai::OllamaProvider::discover_models` and passes them in\n     /// here. `configured = true` for every entry, because the names\n     /// only exist if the endpoint answered `/api/tags`. Context limits\n+    /// use a conservative placeholder ([`OLLAMA_DEFAULT_CONTEXT`]) since\n+    /// `/api/tags` doesn't report context windows; per-model enrichment\n+    /// via `/api/show` is a follow-up. Pricing is `None` (local = free).\n     pub fn with_ollama_models<I, S>(mut self, models: I) -> Self\n     where\n         I: IntoIterator<Item = S>,\n@@ -167,13 +172,8 @@ impl RouteCatalog {\n                 \"ollama\",\n                 m.as_ref(),\n                 true,\n-                // Unknown window: /api/tags reports none. Leave it None\n-                // (not a fabricated placeholder) so it can't drive\n-                // compaction; a per-model models.toml entry or the catalog\n-                // sync tool fills it in. Until then compaction uses the\n-                // safe DEFAULT, and the meter shows no fake denominator.\n-                None,\n-                None,\n+                OLLAMA_DEFAULT_CONTEXT,\n+                OLLAMA_DEFAULT_CONTEXT,\n             ));\n         }\n         self\n@@ -220,8 +220,8 @@ fn build_entry(\n     provider_kind: &str,\n     model: &str,\n     configured: bool,\n-    context_soft: Option<u64>,\n-    context_hard: Option<u64>,\n+    context_soft: u64,\n+    context_hard: u64,\n ) -> RouteEntry {\n     let catalog = model_catalog::global();\n     let pricing = pricing::for_model(provider_kind, model);\n     let model_settings = catalog.resolve_model(model);\n     let provider_settings = catalog.provider(provider_kind);\n \n-    let context_soft = model_settings.context_soft_limit.or(context_soft);\n-    let context_hard = model_settings.context_hard_limit.or(context_hard);\n+    let context_soft = model_settings.context_soft_limit.unwrap_or(context_soft);\n+    let context_hard = model_settings.context_hard_limit.unwrap_or(context_hard);\n     let favorites = catalog\n         .favorites_for(provider_kind, model)\n         .into_iter()\n@@ -305,8 +305,8 @@ fn build_entry(\n         quirks: model_settings.quirks.into_iter().map(Arc::from).collect(),\n         max_output_tokens: model_settings.max_output_tokens,\n         favorites,\n-        context_soft_limit: context_soft,\n-        context_hard_limit: context_hard,\n+        context_soft_limit: Some(context_soft),\n+        context_hard_limit: Some(context_hard),\n         valid_effort_levels: valid_effort,\n         pricing_input_per_mtok: pricing.map(|p| p.input_per_mtok),\n         pricing_output_per_mtok: pricing.map(|p| p.output_per_mtok),\n@@ -324,6 +324,11 @@ const OPENAI_CODEX_MODELS: &[(&str, u64, u64)] = &[(\"gpt-5.5\", 1_000_000, 1_000_000)];\n \n+/// Conservative placeholder context window for ollama models, applied\n+/// to both soft and hard limits. `/api/tags` doesn't report context\n+/// windows; per-model `/api/show` enrichment is a follow-up. (mu-818c)\n+const OLLAMA_DEFAULT_CONTEXT: u64 = 32_768;\n+\n const OPENROUTER_MODELS: &[(&str, u64, u64)] = &[\n     (\"anthropic/claude-opus-4.7\", 200_000, 1_000_000),\n     (\"anthropic/claude-sonnet-4.6\", 200_000, 200_000),\n",
+    "expected_findings": [
+      {
+        "id": "fabricated-context-placeholder-drives-compaction",
+        "severity": "major",
+        "file": "crates/mu-core/src/route_catalog.rs",
+        "line": 175,
+        "keywords": [
+          "placeholder",
+          "32768",
+          "context",
+          "soft",
+          "compaction",
+          "unknown"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 331
+  },
+  {
+    "provenance": "synthesized",
+    "id": "pr331-placeholder-context-compaction-synth",
+    "language": "rust",
+    "title": "Discovery path fabricates a small default context window that becomes the compaction threshold",
+    "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+    "diff": "diff --git a/src/catalog.rs b/src/catalog.rs\n--- a/src/catalog.rs\n+++ b/src/catalog.rs\n@@ -1,24 +1,33 @@\n /// Fallback used by the agent loop when a model's context window is\n /// unknown. Large on purpose: a real local model's window is far bigger\n /// than any small probe-time guess, so an unknown window must defer to\n /// this rather than trip the compaction trigger prematurely.\n const DEFAULT_COMPACTION_THRESHOLD: u64 = 150_000;\n \n pub struct ModelEntry {\n     pub name: String,\n     /// Soft context limit; `None` means \"unknown window\".\n     pub context_soft_limit: Option<u64>,\n }\n \n-/// Build an entry for a model discovered via `/api/tags`, which does NOT\n-/// report context windows. Unknown window stays `None`.\n-fn discovered_entry(name: &str) -> ModelEntry {\n+/// Build an entry for a model discovered via `/api/tags`, which does NOT\n+/// report context windows.\n+fn discovered_entry(name: &str) -> ModelEntry {\n+    // /api/tags gives us no window, so default to a conservative 32k.\n     ModelEntry {\n         name: name.to_string(),\n-        context_soft_limit: None,\n+        context_soft_limit: Some(32_768),\n     }\n }\n \n /// The agent loop compacts the conversation once estimated tokens exceed\n /// the soft limit; an unknown window falls back to the safe default.\n pub fn compaction_threshold(entry: &ModelEntry) -> u64 {\n     entry.context_soft_limit.unwrap_or(DEFAULT_COMPACTION_THRESHOLD)\n }\n",
+    "expected_findings": [
+      {
+        "id": "fabricated-default-window-trips-compaction",
+        "severity": "major",
+        "file": "src/catalog.rs",
+        "line": 27,
+        "keywords": [
+          "placeholder",
+          "32768",
+          "none",
+          "compaction",
+          "threshold",
+          "unknown"
+        ]
+      }
+    ],
+    "forbidden_claims": [
+      "tests pass",
+      "i ran",
+      "cargo test",
+      "verified"
+    ],
+    "source_pr": 331
+  }
+]

@@ -30,7 +30,7 @@
     }
   },
   "ollama": {
-    "endpoint": "http://10.1.1.143:11434",
+    "endpoint": "http://127.0.0.1:11434",
     "models": {
       "qwen3-coder:30b": {
         "params": "30.5B",

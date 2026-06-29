@@ -1,0 +1,31 @@
+diff --git a/crates/mu-core/src/event_log.rs b/crates/mu-core/src/event_log.rs
+--- a/crates/mu-core/src/event_log.rs
++++ b/crates/mu-core/src/event_log.rs
+@@ -861,24 +861,21 @@ impl SessionEventLog {
+     pub fn append_with_parents(
+         &self,
+         actor: EventActor,
+         payload: EventPayload,
+         parent_event_ids: Vec<u64>,
+     ) -> u64 {
+-        // mu-kgpg: this mutex is also the append-order mutex.  Both
+-        // best-effort appends and strict command appends hold it from
+-        // id assignment through disk projection and in-memory push, so
+-        // file order, event id order, and snapshot order cannot drift
+-        // across the two append paths.
++        // Reserve the id up front (cheap, lock-free), then take the disk
++        // lock only for the write.
++        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+         let mut disk_guard = match self.disk_writer.lock() {
+             Ok(guard) => guard,
+             Err(poisoned) => {
+                 tracing::warn!(
+                     session_id = %self.session_id,
+                     "disk writer mutex poisoned; recovering for best-effort append"
+                 );
+                 poisoned.into_inner()
+             }
+         };
+-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+         let event = SessionEvent {
+             id,

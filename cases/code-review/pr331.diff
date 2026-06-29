@@ -1,0 +1,407 @@
+diff --git a/crates/mu-core/src/model_catalog.rs b/crates/mu-core/src/model_catalog.rs
+index a7d3757..738480d 100644
+--- a/crates/mu-core/src/model_catalog.rs
++++ b/crates/mu-core/src/model_catalog.rs
+@@ -94,6 +94,18 @@ pub fn default_config_path() -> Option<PathBuf> {
+     dirs::config_dir().map(|p| p.join("mu").join("models.toml"))
+ }
+ 
++/// The generated catalog layer sits next to the operator `models.toml`
++/// and is merged BELOW it (operator wins). Written by the catalog sync
++/// tool; the loader merges it if present.
++pub fn generated_path_for(operator_config: &Path) -> PathBuf {
++    operator_config.with_file_name("models.generated.toml")
++}
++
++/// `~/.config/mu/models.generated.toml` — the sync tool's write target.
++pub fn default_generated_path() -> Option<PathBuf> {
++    default_config_path().map(|p| generated_path_for(&p))
++}
++
+ pub fn built_in() -> ModelCatalogConfig {
+     DEFAULT_CATALOG
+         .get_or_init(|| {
+@@ -109,8 +121,20 @@ pub fn load(config_path: Option<&Path>) -> ModelCatalogConfig {
+     let path = config_path
+         .map(Path::to_path_buf)
+         .or_else(default_config_path);
++    // Merge order (ascending precedence): built-in defaults < generated
++    // layer < operator models.toml < env. The generated layer
++    // (`models.generated.toml`, written by the catalog sync tool) sits
++    // BELOW the operator file on purpose: a hand edit in models.toml
++    // always wins over a probed value, and re-running the sync never
++    // clobbers operator overrides. No-op until the sync tool writes it.
++    if let Some(g) = path.as_ref().map(|p| generated_path_for(p)) {
++        if g.exists() {
++            fig = fig.merge(Toml::file(&g));
++        }
++    }
+     if let Some(p) = path.as_ref() {
+         if p.exists() {
++            warn_mis_keyed_model_tables(p);
+             fig = fig.merge(Toml::file(p));
+         }
+     }
+@@ -122,6 +146,51 @@ pub fn load(config_path: Option<&Path>) -> ModelCatalogConfig {
+         })
+ }
+ 
++/// Warn on the `["models.x:y"]` footgun. Quoting the *whole* dotted path
++/// makes a TOP-LEVEL key literally named `models.x:y` instead of an entry
++/// under `[models]`, so the `#[serde(default)]` catalog silently drops it
++/// and the operator's override never applies (the 2026-06-19 ollama
++/// incident: `["models.qwen3.6:27b"]` -> ignored -> fell to the placeholder).
++/// Detect such stray top-level keys and point at the correct form. Best
++/// effort: unreadable/unparseable files are left to the normal load path.
++/// Pure detector: stray top-level keys shaped like `models.x` /
++/// `model_rules.x` (the `["models.x:y"]` mis-key). Returns them so the
++/// warner can report and tests can assert. Unparseable TOML -> empty
++/// (the normal load path surfaces parse errors).
++fn mis_keyed_model_tables(text: &str) -> Vec<String> {
++    let Ok(value) = toml::from_str::<toml::Value>(text) else {
++        return Vec::new();
++    };
++    let Some(table) = value.as_table() else {
++        return Vec::new();
++    };
++    table
++        .keys()
++        .filter(|k| k.starts_with("models.") || k.starts_with("model_rules."))
++        .cloned()
++        .collect()
++}
++
++fn warn_mis_keyed_model_tables(p: &Path) {
++    let Ok(text) = std::fs::read_to_string(p) else {
++        return;
++    };
++    for key in mis_keyed_model_tables(&text) {
++        let section = if key.starts_with("models.") {
++            "models"
++        } else {
++            "model_rules"
++        };
++        let entry = &key[section.len() + 1..];
++        tracing::warn!(
++            stray_key = %key,
++            "model catalog: top-level key `{key}` looks like a mis-keyed table — \
++             quoting the whole path makes it a top-level key, not an entry under \
++             [{section}], so it is SILENTLY IGNORED. Use [{section}.\"{entry}\"] instead."
++        );
++    }
++}
++
+ pub fn global() -> &'static ModelCatalogConfig {
+     LOADED_CATALOG.get_or_init(|| load(None))
+ }
+@@ -272,6 +341,69 @@ pub fn max_output_tokens_for_model(model: &str) -> u32 {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn detects_mis_keyed_model_tables() {
++        // The footgun: whole path quoted -> top-level stray key, silently
++        // ignored. The correct forms (nested) must NOT be flagged.
++        let toml = r#"
++["models.qwen3.6:27b"]
++model = "qwen3.6:27b"
++context_soft_limit = 200000
++
++["model_rules.deepseek:v4"]
++prefix = "deepseek"
++
++[models."qwen3-coder:30b"]
++model = "qwen3-coder:30b"
++
++[model_rules.deepseek]
++prefix = "deepseek"
++
++[models.gpt-oss-rev]
++model = "gpt-oss-rev"
++"#;
++        let mut stray = mis_keyed_model_tables(toml);
++        stray.sort();
++        assert_eq!(
++            stray,
++            vec![
++                "model_rules.deepseek:v4".to_string(),
++                "models.qwen3.6:27b".to_string(),
++            ],
++            "only the whole-path-quoted tables are flagged; nested forms are fine"
++        );
++    }
++
++    #[test]
++    fn generated_layer_merges_under_operator() {
++        // The sync tool's models.generated.toml is merged BELOW the
++        // operator models.toml: operator values win per-field, generated
++        // fills the gaps the operator didn't set.
++        let dir = std::env::temp_dir().join(format!("mu-catalog-gen-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let op = dir.join("models.toml");
++        let gen = generated_path_for(&op);
++        std::fs::write(
++            &gen,
++            "[models.\"m1\"]\nmodel = \"m1\"\ncontext_hard_limit = 999\nmax_output_tokens = 111\n",
++        )
++        .unwrap();
++        std::fs::write(
++            &op,
++            "[models.\"m1\"]\nmodel = \"m1\"\ncontext_hard_limit = 222\n",
++        )
++        .unwrap();
++        let cfg = load(Some(&op));
++        let m = cfg.models.get("m1").expect("m1 present from merged layers");
++        assert_eq!(m.context_hard_limit, Some(222), "operator value wins");
++        assert_eq!(
++            m.max_output_tokens,
++            Some(111),
++            "generated fills the field the operator left unset"
++        );
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     #[test]
+     fn built_in_qwen36_gets_reasoning_budget() {
+         assert_eq!(
+diff --git a/crates/mu-core/src/route_catalog.rs b/crates/mu-core/src/route_catalog.rs
+index b810b96..e3d49cf 100644
+--- a/crates/mu-core/src/route_catalog.rs
++++ b/crates/mu-core/src/route_catalog.rs
+@@ -98,13 +98,19 @@ impl RouteCatalog {
+                 "anthropic_api",
+                 model,
+                 anthropic_key,
+-                *soft,
+-                *hard,
++                Some(*soft),
++                Some(*hard),
+             ));
+         }
+ 
+         for (model, soft, hard) in OPENAI_CODEX_MODELS {
+-            entries.push(build_entry("openai_codex", model, openai_key, *soft, *hard));
++            entries.push(build_entry(
++                "openai_codex",
++                model,
++                openai_key,
++                Some(*soft),
++                Some(*hard),
++            ));
+         }
+ 
+         for (model, soft, hard) in OPENROUTER_MODELS {
+@@ -112,16 +118,28 @@ impl RouteCatalog {
+                 "openrouter",
+                 model,
+                 openrouter_key,
+-                *soft,
+-                *hard,
++                Some(*soft),
++                Some(*hard),
+             ));
+         }
+ 
+         for (model, soft, hard) in VLLM_MODELS {
+-            entries.push(build_entry("vllm", model, vllm_configured, *soft, *hard));
++            entries.push(build_entry(
++                "vllm",
++                model,
++                vllm_configured,
++                Some(*soft),
++                Some(*hard),
++            ));
+         }
+ 
+-        entries.push(build_entry("faux", "faux", true, 128_000, 128_000));
++        entries.push(build_entry(
++            "faux",
++            "faux",
++            true,
++            Some(128_000),
++            Some(128_000),
++        ));
+ 
+         Self { entries }
+     }
+@@ -133,10 +151,12 @@ impl RouteCatalog {
+     /// via `mu_ai::OllamaProvider::discover_models` and passes them in
+     /// here. `configured = true` for every entry, because the names
+     /// only exist if the endpoint answered `/api/tags`. Context limits
+-    /// use a conservative placeholder ([`OLLAMA_DEFAULT_CONTEXT`]) since
+-    /// `/api/tags` doesn't report context windows; per-model enrichment
+-    /// via `/api/show` is a follow-up. Pricing is `None` (local = free).
+-    /// (bead mu-818c)
++    /// are left `None` (unknown) — `/api/tags` doesn't report windows and
++    /// a fabricated placeholder must never drive compaction. A per-model
++    /// `models.toml` entry or the catalog sync tool supplies the real
++    /// window; until then an unknown window falls back to the safe
++    /// `DEFAULT_COMPACTION_THRESHOLD` for compaction. Pricing is `None`
++    /// (local = free). (bead mu-818c; context-limit-harden-sync)
+     pub fn with_ollama_models<I, S>(mut self, models: I) -> Self
+     where
+         I: IntoIterator<Item = S>,
+@@ -147,8 +167,13 @@ impl RouteCatalog {
+                 "ollama",
+                 m.as_ref(),
+                 true,
+-                OLLAMA_DEFAULT_CONTEXT,
+-                OLLAMA_DEFAULT_CONTEXT,
++                // Unknown window: /api/tags reports none. Leave it None
++                // (not a fabricated placeholder) so it can't drive
++                // compaction; a per-model models.toml entry or the catalog
++                // sync tool fills it in. Until then compaction uses the
++                // safe DEFAULT, and the meter shows no fake denominator.
++                None,
++                None,
+             ));
+         }
+         self
+@@ -156,8 +181,9 @@ impl RouteCatalog {
+ 
+     /// Merge dynamically-discovered vLLM models into the catalog.
+     /// vLLM exposes OpenAI-compatible `/v1/models`; the daemon probes it
+-    /// at startup and passes the returned ids here. Context defaults to
+-    /// 32k until per-model enrichment exists.
++    /// at startup and passes the returned ids here. Context limits are
++    /// left `None` (unknown) until a `models.toml` entry or the catalog
++    /// sync tool supplies them — see `with_ollama_models`.
+     pub fn with_vllm_models<I, S>(mut self, models: I) -> Self
+     where
+         I: IntoIterator<Item = S>,
+@@ -168,8 +194,10 @@ impl RouteCatalog {
+                 "vllm",
+                 m.as_ref(),
+                 true,
+-                VLLM_DEFAULT_CONTEXT,
+-                VLLM_DEFAULT_CONTEXT,
++                // Unknown window (see with_ollama_models) — None, not a
++                // fabricated placeholder.
++                None,
++                None,
+             ));
+         }
+         self
+@@ -198,16 +226,23 @@ fn build_entry(
+     provider_kind: &str,
+     model: &str,
+     configured: bool,
+-    context_soft: u64,
+-    context_hard: u64,
++    context_soft: Option<u64>,
++    context_hard: Option<u64>,
+ ) -> RouteEntry {
+     let catalog = model_catalog::global();
+     let pricing = pricing::for_model(provider_kind, model);
+     let model_settings = catalog.resolve_model(model);
+     let provider_settings = catalog.provider(provider_kind);
+ 
+-    let context_soft = model_settings.context_soft_limit.unwrap_or(context_soft);
+-    let context_hard = model_settings.context_hard_limit.unwrap_or(context_hard);
++    // The per-model catalog value wins; otherwise the caller's fallback.
++    // Discovered-but-unenriched providers (ollama/vllm) pass `None` so an
++    // unknown context window stays `None` rather than a fabricated small
++    // placeholder — a placeholder must never drive compaction (it did:
++    // ollama's 32k placeholder made the agent loop compact every turn).
++    // Unknown -> None -> the compaction trigger falls back to the safe
++    // DEFAULT_COMPACTION_THRESHOLD instead. (bead context-limit-harden-sync)
++    let context_soft = model_settings.context_soft_limit.or(context_soft);
++    let context_hard = model_settings.context_hard_limit.or(context_hard);
+     let favorites = catalog
+         .favorites_for(provider_kind, model)
+         .into_iter()
+@@ -239,7 +274,11 @@ fn build_entry(
+         _ => None,
+     };
+ 
+-    let hash_input = format!("{provider_kind}:{model}:{context_soft}:{context_hard}");
++    let hash_input = format!(
++        "{provider_kind}:{model}:{}:{}",
++        context_soft.unwrap_or(0),
++        context_hard.unwrap_or(0)
++    );
+     let hash: Arc<str> = Arc::from(
+         blake3::hash(hash_input.as_bytes())
+             .to_hex()
+@@ -266,8 +305,8 @@ fn build_entry(
+         quirks: model_settings.quirks.into_iter().map(Arc::from).collect(),
+         max_output_tokens: model_settings.max_output_tokens,
+         favorites,
+-        context_soft_limit: Some(context_soft),
+-        context_hard_limit: Some(context_hard),
++        context_soft_limit: context_soft,
++        context_hard_limit: context_hard,
+         valid_effort_levels: valid_effort,
+         pricing_input_per_mtok: pricing.map(|p| p.input_per_mtok),
+         pricing_output_per_mtok: pricing.map(|p| p.output_per_mtok),
+@@ -285,15 +324,6 @@ const ANTHROPIC_MODELS: &[(&str, u64, u64)] = &[
+ 
+ const OPENAI_CODEX_MODELS: &[(&str, u64, u64)] = &[("gpt-5.5", 1_000_000, 1_000_000)];
+ 
+-/// Conservative placeholder context window for ollama models, applied
+-/// to both soft and hard limits. `/api/tags` doesn't report context
+-/// windows; per-model `/api/show` enrichment is a follow-up. (mu-818c)
+-const OLLAMA_DEFAULT_CONTEXT: u64 = 32_768;
+-
+-/// Conservative placeholder context window for vLLM-served models.
+-/// `/v1/models` reports ids, not context windows.
+-const VLLM_DEFAULT_CONTEXT: u64 = 32_768;
+-
+ const OPENROUTER_MODELS: &[(&str, u64, u64)] = &[
+     ("anthropic/claude-opus-4.7", 200_000, 1_000_000),
+     ("anthropic/claude-sonnet-4.6", 200_000, 200_000),
+@@ -320,8 +350,20 @@ mod tests {
+ 
+     #[test]
+     fn hash_is_deterministic() {
+-        let a = build_entry("anthropic_api", "claude-opus-4-7", true, 200_000, 1_000_000);
+-        let b = build_entry("anthropic_api", "claude-opus-4-7", true, 200_000, 1_000_000);
++        let a = build_entry(
++            "anthropic_api",
++            "claude-opus-4-7",
++            true,
++            Some(200_000),
++            Some(1_000_000),
++        );
++        let b = build_entry(
++            "anthropic_api",
++            "claude-opus-4-7",
++            true,
++            Some(200_000),
++            Some(1_000_000),
++        );
+         assert_eq!(a.hash, b.hash);
+     }
+ 
+@@ -331,15 +373,15 @@ mod tests {
+             "anthropic_api",
+             "claude-test-hash",
+             true,
+-            200_000,
+-            1_000_000,
++            Some(200_000),
++            Some(1_000_000),
+         );
+         let b = build_entry(
+             "anthropic_api",
+             "claude-test-hash",
+             true,
+-            500_000,
+-            1_000_000,
++            Some(500_000),
++            Some(1_000_000),
+         );
+         assert_ne!(a.hash, b.hash);
+     }
+@@ -376,7 +418,10 @@ mod tests {
+             .find("ollama", "qwen3-coder:30b")
+             .expect("ollama model should be present");
+         assert!(q.configured, "discovered ollama models are configured");
+-        assert_eq!(q.context_soft_limit, Some(OLLAMA_DEFAULT_CONTEXT));
++        // Unknown window: discovered but not in the catalog and no longer
++        // fabricated — stays None so it can't drive compaction.
++        assert_eq!(q.context_soft_limit, None);
++        assert_eq!(q.context_hard_limit, None);
+         // Local inference: no pricing.
+         assert_eq!(q.pricing_input_per_mtok, None);
+         assert_eq!(q.pricing_output_per_mtok, None);

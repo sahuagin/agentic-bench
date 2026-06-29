@@ -1,0 +1,17 @@
+{
+  "id": "python_sql_injection",
+  "language": "python",
+  "title": "SQL injection introduced in user lookup",
+  "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+  "diff": "diff --git a/app/users.py b/app/users.py\nindex 9d1..b42 100644\n--- a/app/users.py\n+++ b/app/users.py\n@@ -8,8 +8,12 @@ def get_user(conn, user_id: int):\n     return cur.fetchone()\n \n def find_users(conn, name_prefix: str):\n-    cur = conn.execute(\"SELECT id, name, email FROM users WHERE name LIKE ?\", (name_prefix + '%',))\n+    # Support admin wildcards in the search box.\n+    sql = f\"SELECT id, name, email FROM users WHERE name LIKE '{name_prefix}%'\"\n+    cur = conn.execute(sql)\n     return cur.fetchall()\n",
+  "expected_findings": [
+    {
+      "id": "sql-injection",
+      "severity": "blocker",
+      "file": "app/users.py",
+      "line": 12,
+      "keywords": ["sql injection", "interpolation", "parameter", "name_prefix"]
+    }
+  ],
+  "forbidden_claims": ["tests pass", "i ran", "verified by running"]
+}

@@ -1,4 +1,5 @@
-results/
+.env
 __pycache__/
 arch_results/
-__pycache__/
+config.toml
+results/

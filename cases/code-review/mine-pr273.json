@@ -1,0 +1,46 @@
+{
+  "pr": 273,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "In handle_overlay_key the overlay modal state is moved out of self via Option::take() at the top and only restored at the bottom, but the copy-out arm used `?` to propagate a clipboard error, early-returning past the restore so the modal is silently lost (and never reopened) whenever the copy fails.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr273-overlay-take-leak-on-error-reverse",
+      "language": "rust",
+      "title": "Overlay modal taken out of self leaks when copy error is `?`-propagated past the restore",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-solo/src/app.rs b/crates/mu-solo/src/app.rs\n--- a/crates/mu-solo/src/app.rs\n+++ b/crates/mu-solo/src/app.rs\n@@ -1903,7 +1903,7 @@ impl App {\n     fn handle_overlay_key(&mut self, vp: &mut DynamicViewport, key: KeyEvent) -> Result<bool> {\n         let Some(mut overlay) = self.overlay.take() else {\n             return Ok(false);\n         };\n@@ -1917,16 +1917,8 @@ impl App {\n             (_, KeyCode::Char('c')) => {\n                 let text = overlay\n                     .lines\n                     .iter()\n                     .map(|l| {\n                         l.spans\n                             .iter()\n                             .map(|s| s.content.as_ref())\n                             .collect::<String>()\n                     })\n                     .collect::<Vec<_>>()\n                     .join(\"\\n\");\n-                // Don't `?` here: the overlay was taken out at the top of this\n-                // fn and is only restored at the bottom — propagating would leak\n-                // it (modal silently dies). Report the outcome via flash either\n-                // way and fall through to the restore.\n-                match copy_to_clipboard_or_file(text.trim(), self.clipboard_command.as_deref()) {\n-                    Ok(outcome) => {\n-                        self.set_flash(format!(\"\\u{2713} copied {} \\u{b7} {outcome}\", overlay.title))\n-                    }\n-                    Err(e) => self.set_flash(format!(\"copy failed: {e}\")),\n-                }\n+                let outcome =\n+                    copy_to_clipboard_or_file(text.trim(), self.clipboard_command.as_deref())?;\n+                self.set_flash(format!(\"\\u{2713} copied {} \\u{b7} {outcome}\", overlay.title));\n             }\n             (_, KeyCode::Up) | (KeyModifiers::ALT, KeyCode::Char('k')) => {\n                 overlay.scroll = overlay.scroll.saturating_sub(1);\n             }\n@@ -1957,6 +1949,6 @@ impl App {\n             (_, KeyCode::Home) => overlay.scroll = 0,\n             (_, KeyCode::End) => overlay.scroll = usize::MAX,\n             _ => {}\n         }\n         self.overlay = Some(overlay);\n         Ok(false)\n     }\n",
+      "expected_findings": [
+        {
+          "id": "overlay-leaked-on-copy-error",
+          "severity": "major",
+          "file": "crates/mu-solo/src/app.rs",
+          "line": 1933,
+          "keywords": ["take", "?", "restore", "overlay", "early return", "leak"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr273-take-restore-error-skip-synth",
+      "language": "rust",
+      "title": "State moved out of self with take() is dropped when an error is `?`-propagated before the restore",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/src/editor.rs b/src/editor.rs\n--- a/src/editor.rs\n+++ b/src/editor.rs\n@@ -10,17 +10,16 @@ impl Editor {\n     /// Handle a key while a modal is open. The modal is moved out of `self`\n     /// at the top and put back at the bottom so we can mutate it freely.\n     fn handle_modal_key(&mut self, key: Key) -> Result<()> {\n         let Some(mut modal) = self.modal.take() else {\n             return Ok(());\n         };\n         match key {\n             Key::Up => modal.scroll = modal.scroll.saturating_sub(1),\n             Key::Down => modal.scroll = modal.scroll.saturating_add(1),\n             // Copy the modal's text to the clipboard, then keep it open.\n-            Key::Copy => match copy_to_clipboard(&modal.text) {\n-                Ok(()) => self.flash = Some(\"copied\".into()),\n-                Err(e) => self.flash = Some(format!(\"copy failed: {e}\")),\n-            },\n+            Key::Copy => copy_to_clipboard(&modal.text)?,\n             _ => {}\n         }\n         // Restore the modal so it stays on screen.\n         self.modal = Some(modal);\n         Ok(())\n     }\n",
+      "expected_findings": [
+        {
+          "id": "modal-dropped-on-clipboard-error",
+          "severity": "major",
+          "file": "src/editor.rs",
+          "line": 24,
+          "keywords": ["take", "?", "restore", "modal", "early return", "dropped"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}

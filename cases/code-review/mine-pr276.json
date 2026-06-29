@@ -1,0 +1,46 @@
+{
+  "pr": 276,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "Structured path tools (read/write/edit/ls/glob/grep) passed the raw `path` argument straight to `PathBuf::from`, so a leading `~`/`~/...` was never expanded to $HOME and the tool operated on a literal `~` path, silently failing or hitting the wrong location.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr276-tilde-not-expanded-reverse",
+      "language": "rust",
+      "title": "read tool stops expanding leading `~` and uses the literal path",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-coding/src/tools/read.rs b/crates/mu-coding/src/tools/read.rs\n--- a/crates/mu-coding/src/tools/read.rs\n+++ b/crates/mu-coding/src/tools/read.rs\n@@ -5,7 +5,6 @@ use std::pin::Pin;\n \n use tokio::sync::oneshot;\n \n-use crate::tools::path::expand_leading_tilde;\n use mu_core::agent::{Tool, ToolResult, ToolSpec};\n use serde_json::{json, Value};\n \n@@ -95,7 +94,7 @@ fn path_argument(arguments: &Value) -> Result<PathBuf, ToolResult> {\n     arguments\n         .get(\"path\")\n         .and_then(Value::as_str)\n-        .map(expand_leading_tilde)\n+        .map(PathBuf::from)\n         .ok_or_else(|| ToolResult {\n             content: \"missing required `path` argument\".to_owned(),\n             is_error: true,\n",
+      "expected_findings": [
+        {
+          "id": "tilde-not-expanded",
+          "severity": "major",
+          "file": "crates/mu-coding/src/tools/read.rs",
+          "line": 97,
+          "keywords": ["tilde", "expand", "home", "pathbuf", "literal", "~"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr276-tilde-not-expanded-synth",
+      "language": "rust",
+      "title": "file-open helper treats `~/...` as a literal path",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/src/open_config.rs b/src/open_config.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/open_config.rs\n@@ -0,0 +1,20 @@\n+use std::fs;\n+use std::io;\n+use std::path::PathBuf;\n+\n+/// Resolve a user-supplied config path and read it.\n+/// Callers may pass shell shorthand like `~/.config/app.toml`.\n+fn resolve_path(input: &str) -> PathBuf {\n+    PathBuf::from(input)\n+}\n+\n+pub fn read_config(input: &str) -> io::Result<String> {\n+    let path = resolve_path(input);\n+    fs::read_to_string(&path)\n+}\n+\n+#[test]\n+fn reads_home_config() {\n+    // Passing \"~/.config/app.toml\" should read $HOME/.config/app.toml.\n+    let _ = read_config(\"~/.config/app.toml\");\n+}\n",
+      "expected_findings": [
+        {
+          "id": "tilde-not-expanded-synth",
+          "severity": "major",
+          "file": "src/open_config.rs",
+          "line": 8,
+          "keywords": ["tilde", "expand", "home", "literal", "~", "shell"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "pr": 319,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "When the merged operator config fails deserialization (one unknown/renamed field makes serde's deny_unknown_fields reject the ENTIRE file), the loader logs a single quiet WARN and silently falls back to all-defaults, discarding every operator setting and all MCP servers with no loud signal and no way to fail fast.",
+  "severity": "major",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr319-silent-config-drop-reverse",
+      "language": "rust",
+      "title": "Config deserialization failure swallowed by a quiet WARN, silently degrading to all-defaults",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-core/src/config.rs b/crates/mu-core/src/config.rs\n--- a/crates/mu-core/src/config.rs\n+++ b/crates/mu-core/src/config.rs\n@@ -763,15 +763,9 @@ impl Config {\n         match merged.try_into::<Config>() {\n             Ok(c) => (c, sources),\n             Err(e) => {\n-                // The whole merged config is schema-invalid — almost always one\n-                // unknown/renamed field (deny_unknown_fields rejects the ENTIRE\n-                // file). Catastrophic: every setting the operator wrote, every\n-                // MCP server, is discarded. This is the case that silently hid\n-                // a broken config behind a single WARN (at-loud-config).\n-                loud_config_drop(\n-                    \"mu config failed to load — your ENTIRE config was IGNORED\",\n-                    &e.to_string(),\n-                    \"the entire config\",\n+                tracing::warn!(\n+                    error = %e,\n+                    \"merged mu config failed deserialization; falling back to all-defaults\",\n                 );\n                 // The files did NOT contribute to the effective config\n                 // — provenance must say so.\n                 (Config::default(), vec![\"defaults\".to_string()])\n             }\n         }\n     }\n",
+      "expected_findings": [
+        {
+          "id": "silent-config-discard",
+          "severity": "major",
+          "file": "crates/mu-core/src/config.rs",
+          "line": 766,
+          "keywords": ["silent", "warn", "defaults", "discard", "config", "deny_unknown_fields"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr319-silent-config-drop-synth",
+      "language": "rust",
+      "title": "Loader swallows the deserialize error and silently returns defaults on a malformed operator config",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/src/settings.rs b/src/settings.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/settings.rs\n@@ -0,0 +1,28 @@\n+use serde::Deserialize;\n+\n+#[derive(Debug, Default, Deserialize)]\n+#[serde(deny_unknown_fields)]\n+pub struct Settings {\n+    pub max_workers: u32,\n+    pub endpoint: String,\n+    pub servers: Vec<String>,\n+}\n+\n+/// Load operator settings from a TOML file the user wrote by hand.\n+/// On any failure we fall back to built-in defaults so the daemon\n+/// always boots.\n+pub fn load_settings(path: &str) -> Settings {\n+    let text = match std::fs::read_to_string(path) {\n+        Ok(t) => t,\n+        Err(_) => return Settings::default(),\n+    };\n+    match toml::from_str::<Settings>(&text) {\n+        Ok(s) => s,\n+        Err(e) => {\n+            // One unknown/renamed field makes deny_unknown_fields reject the\n+            // whole file — but just note it and carry on with defaults.\n+            log::debug!(\"settings parse failed: {e}\");\n+            Settings::default()\n+        }\n+    }\n+}\n",
+      "expected_findings": [
+        {
+          "id": "swallowed-parse-error-defaults",
+          "severity": "major",
+          "file": "src/settings.rs",
+          "line": 22,
+          "keywords": ["swallow", "silent", "debug", "defaults", "deny_unknown_fields", "error"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}

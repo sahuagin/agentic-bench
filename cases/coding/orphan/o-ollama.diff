@@ -1,0 +1,67 @@
+diff --git a/crates/mu-core/src/context/compaction/heuristic.rs b/crates/mu-core/src/context/compaction/heuristic.rs
+index 73805f4..6b42cc4 100644
+--- a/crates/mu-core/src/context/compaction/heuristic.rs
++++ b/crates/mu-core/src/context/compaction/heuristic.rs
+@@ -51,10 +51,11 @@
+ //! lifetime anyway. A future bead can extend rope.rs with a
+ //! span-filter primitive that preserves provenance.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::time::Instant;
+ 
+ use super::{CompactionDecision, CompactionPolicy, CompactionResult};
++use crate::context::assembly::extract_call_id_from_span_id;
+ use crate::context::rope::{RetainedRope, RetentionClass, Span, SpanKind};
+ 
+ /// Number of most-recent `Assistant` spans preserved across a
+@@ -113,7 +114,48 @@ fn span_size(span: &Span) -> usize {
+     super::estimate_tokens(std::slice::from_ref(span))
+ }
+ 
+-/// Mark `idx` as dropped with `reason`. Idempotent.
++/// Extract call ids from an assistant span's content blocks (each
++/// `ContentBlock::ToolCall` carries a unique `id`).
++fn assistant_call_ids(span: &Span) -> Vec<&str> {
++    span.blocks()
++        .map(|blocks| {
++            blocks
++                .iter()
++                .filter_map(|b| match b {
++                    crate::context::rope::ContentBlock::ToolCall(tc) => Some(tc.id.as_str()),
++                    _ => None,
++                })
++                .collect()
++        })
++        .unwrap_or_default()
++}
++
++/// Build a mapping from call_id → span indices for every tool-related
++/// exchange in the rope.  An assistant's `ContentBlock::ToolCall` id is
++/// paired with every tool_result whose span id carries that call id
++/// (via the `-tool-result:<call_id>` suffix).  This enables correct
++/// compaction when results are non-contiguous or reordered.
++fn build_call_id_map(spans: &[Span]) -> HashMap<String, Vec<usize>> {
++    let mut map: HashMap<String, Vec<usize>> = HashMap::new();
++    for (i, span) in spans.iter().enumerate() {
++        match span.kind {
++            SpanKind::Assistant => {
++                for cid in assistant_call_ids(span) {
++                    map.entry(cid.to_owned()).or_default().push(i);
++                }
++            }
++            SpanKind::ToolResult => {
++                if let Some(cid) = extract_call_id_from_span_id(span.id()) {
++                    map.entry(cid.to_owned()).or_default().push(i);
++                }
++            }
++            _ => {}
++        }
++    }
++    map
++}
++
++/// Mark `idx` as dropped with `reason`.  Idempotent.
+ fn record_drop(
+     idx: usize,
+     reason: &str,

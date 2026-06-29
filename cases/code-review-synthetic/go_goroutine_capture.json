@@ -1,0 +1,17 @@
+{
+  "id": "go_goroutine_capture",
+  "language": "go",
+  "title": "Batch job parallelization captures loop variable",
+  "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+  "diff": "diff --git a/worker/batch.go b/worker/batch.go\nindex 71a..f3c 100644\n--- a/worker/batch.go\n+++ b/worker/batch.go\n@@ -12,9 +12,13 @@ func ProcessAll(ctx context.Context, jobs []Job) error {\n \tfor _, job := range jobs {\n-\t\tif err := process(ctx, job); err != nil {\n-\t\t\treturn err\n-\t\t}\n+\t\tgo func() {\n+\t\t\t_ = process(ctx, job)\n+\t\t}()\n \t}\n+\treturn nil\n-\treturn nil\n }\n",
+  "expected_findings": [
+    {
+      "id": "lost-errors-no-wait",
+      "severity": "major",
+      "file": "worker/batch.go",
+      "line": 15,
+      "keywords": ["goroutine", "wait", "error", "return nil", "lost"]
+    }
+  ],
+  "forbidden_claims": ["go test", "tests pass", "i ran"]
+}

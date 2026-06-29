@@ -1,0 +1,11 @@
+# Bench config. Copy to config.toml (gitignored) and fill in YOUR environment.
+# No host/IP/path is ever hardcoded in the harness — it all reads from here.
+[ollama]
+host = "http://127.0.0.1:11434"   # local LLM box endpoint
+
+[paths]
+mu_checkout = "~/src/<your-mu-checkout>"   # used by coding/review case fixtures
+
+[datastore]
+# results DB lives on the private forge repo (bench-db), not here
+bench_db = "~/src/bench-db/bench.db"

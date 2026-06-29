@@ -22,7 +22,7 @@ cd "$HERE" || exit 1
 echo "autograde: scoring complete ($(date))" >> "$LOG"
 
 # confirm ollama is serving (hard requirement: leave it up) and re-probe
-if curl -s -m 10 "http://10.1.1.143:11434/api/tags" >/dev/null 2>&1; then
+if curl -s -m 10 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
     echo "autograde: ollama SERVING ok" >> "$LOG"
 else
     echo "autograde: WARNING ollama NOT serving — needs a restart" >> "$LOG"

@@ -1,0 +1,315 @@
+diff --git a/crates/mu-core/src/context/compaction/heuristic.rs b/crates/mu-core/src/context/compaction/heuristic.rs
+index 73805f4..2fe62ad 100644
+--- a/crates/mu-core/src/context/compaction/heuristic.rs
++++ b/crates/mu-core/src/context/compaction/heuristic.rs
+@@ -51,10 +51,12 @@
+ //! lifetime anyway. A future bead can extend rope.rs with a
+ //! span-filter primitive that preserves provenance.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::time::Instant;
+ 
+ use super::{CompactionDecision, CompactionPolicy, CompactionResult};
++use crate::agent::types::ContentBlock;
++use crate::context::assembly::extract_call_id_from_span_id;
+ use crate::context::rope::{RetainedRope, RetentionClass, Span, SpanKind};
+ 
+ /// Number of most-recent `Assistant` spans preserved across a
+@@ -156,6 +158,88 @@ fn tool_clusters(spans: &[Span]) -> Vec<Vec<usize>> {
+     clusters
+ }
+ 
++/// Return the tool-use call ids contained in an assistant span's
++/// structured blocks. The flat text projection intentionally omits the
++/// call id, so only `blocks` is authoritative here.
++fn assistant_tool_call_ids(span: &Span) -> Vec<&str> {
++    if span.kind != SpanKind::Assistant {
++        return Vec::new();
++    }
++    span.blocks()
++        .into_iter()
++        .flatten()
++        .filter_map(|block| match block {
++            ContentBlock::ToolCall(call) => Some(call.id.as_str()),
++            _ => None,
++        })
++        .collect()
++}
++
++fn tool_result_call_id(span: &Span) -> Option<&str> {
++    if span.kind == SpanKind::ToolResult {
++        extract_call_id_from_span_id(span.id())
++    } else {
++        None
++    }
++}
++
++/// Group every assistant tool-use span with ALL tool results for any
++/// call id it emitted. Assistant spans are indivisible, so a turn that
++/// fans out to multiple tool calls forms a single exchange containing
++/// the assistant plus every result for every call in the turn,
++/// regardless of adjacency/order in the rope.
++///
++/// Older tests/fixtures may still model tool traffic as adjacent
++/// `ToolCall`/`ToolResult` spans without structured assistant blocks;
++/// keep those legacy adjacent clusters as fallback units.
++fn tool_exchange_units(spans: &[Span]) -> Vec<Vec<usize>> {
++    let mut result_by_call_id: HashMap<&str, Vec<usize>> = HashMap::new();
++    for (idx, span) in spans.iter().enumerate() {
++        if let Some(call_id) = tool_result_call_id(span) {
++            result_by_call_id.entry(call_id).or_default().push(idx);
++        }
++    }
++
++    let mut units = Vec::new();
++    let mut structured_members = HashSet::new();
++    for (idx, span) in spans.iter().enumerate() {
++        let call_ids = assistant_tool_call_ids(span);
++        if call_ids.is_empty() {
++            continue;
++        }
++
++        let mut unit = vec![idx];
++        for call_id in call_ids {
++            if let Some(results) = result_by_call_id.get(call_id) {
++                unit.extend(results.iter().copied());
++            }
++        }
++        unit.sort_unstable();
++        unit.dedup();
++        structured_members.extend(unit.iter().copied());
++        units.push(unit);
++    }
++
++    for cluster in tool_clusters(spans) {
++        if cluster.iter().any(|idx| structured_members.contains(idx)) {
++            continue;
++        }
++        let mut unit = Vec::new();
++        if let Some(&first_idx) = cluster.first() {
++            if first_idx > 0 && spans[first_idx - 1].kind == SpanKind::Assistant {
++                unit.push(first_idx - 1);
++            }
++        }
++        unit.extend(cluster);
++        unit.sort_unstable();
++        unit.dedup();
++        units.push(unit);
++    }
++
++    units.sort_by_key(|unit| unit.iter().copied().min().unwrap_or(usize::MAX));
++    units
++}
++
+ impl CompactionPolicy for SpanFamilyDropPolicy {
+     /// Stable policy label for `AgentEvent::CompactionAssembly`. Without
+     /// this override the heuristic fell through to the trait default
+@@ -221,45 +305,36 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+             }
+         }
+ 
+-        // Tier 2: ToolCall/ToolResult clusters (adjacent), oldest cluster first.
+-        // CRITICAL: also drop the Assistant span immediately preceding each
+-        // cluster — it contains the tool_use block that references the call
+-        // IDs in the cluster. Leaving it orphaned produces an invalid
+-        // conversation (model sees tool_use with no matching tool_result).
+-        let clusters = tool_clusters(spans);
+-        for cluster in &clusters {
++        // Tier 2: logical tool exchanges, oldest exchange first.
++        // A single assistant turn may fan out to multiple tool calls, and
++        // matching tool results may be parallel/non-contiguous/reordered in
++        // the rope. The assistant tool_use blocks and ALL matching results
++        // therefore drop together by call_id, not by adjacency.
++        let tool_units = tool_exchange_units(spans);
++        let mut unit_by_assistant = vec![None; n];
++        for (unit_idx, unit) in tool_units.iter().enumerate() {
++            for &idx in unit {
++                if spans[idx].kind == SpanKind::Assistant {
++                    unit_by_assistant[idx] = Some(unit_idx);
++                }
++            }
++        }
++        for unit in &tool_units {
+             if tokens_after <= target_tokens {
+                 break;
+             }
+-            // mu-tlri: the assistant+cluster unit drops together or
+-            // not at all — a standing member anywhere in the unit
+-            // (theoretical today; tool spans are Hot) would otherwise
+-            // leave an orphaned tool_use/tool_result pairing.
+-            let preceding_standing = cluster
+-                .first()
+-                .filter(|&&first| first > 0 && spans[first - 1].kind == SpanKind::Assistant)
+-                .is_some_and(|&first| !evictable(&spans[first - 1]));
+-            if preceding_standing || cluster.iter().any(|&idx| !evictable(&spans[idx])) {
++            if unit.iter().any(|&idx| !evictable(&spans[idx])) {
+                 continue;
+             }
+-            // Find the Assistant span preceding this cluster.
+-            if let Some(&first_idx) = cluster.first() {
+-                if first_idx > 0 && spans[first_idx - 1].kind == SpanKind::Assistant {
+-                    record_drop(
+-                        first_idx - 1,
+-                        "assistant with orphaned tool_use (evicted with tool cluster)",
+-                        spans,
+-                        &sizes,
+-                        &mut dropped,
+-                        &mut tokens_after,
+-                        &mut decisions,
+-                    );
+-                }
+-            }
+-            for &idx in cluster {
++            for &idx in unit {
++                let reason = if spans[idx].kind == SpanKind::Assistant {
++                    "assistant with orphaned tool_use (evicted with tool cluster)"
++                } else {
++                    "old tool call/result cluster"
++                };
+                 record_drop(
+                     idx,
+-                    "old tool call/result cluster",
++                    reason,
+                     spans,
+                     &sizes,
+                     &mut dropped,
+@@ -270,9 +345,8 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+         }
+ 
+         // Tier 3: old Assistant turns (not in preserved-recent set).
+-        // When dropping an Assistant span that has tool_use content (the
+-        // next span is ToolCall/ToolResult), also drop the tool cluster
+-        // to avoid orphaned tool_results in the conversation.
++        // If the assistant is part of a tool exchange, drop the entire
++        // exchange to avoid orphaning either tool_use or tool_result spans.
+         for i in 0..n {
+             if tokens_after <= target_tokens {
+                 break;
+@@ -281,34 +355,31 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+                 && !preserved_assistants.contains(&i)
+                 && evictable(&spans[i])
+             {
+-                // mu-tlri: assistant + trailing tool cluster drop as a
+-                // unit or not at all (mirrors tier 2's pairing rule) —
+-                // a standing cluster member would otherwise be
+-                // orphaned by the assistant drop.
+-                let cluster_end = (i + 1..n)
+-                    .take_while(|&j| {
+-                        matches!(spans[j].kind, SpanKind::ToolCall | SpanKind::ToolResult)
+-                    })
+-                    .last()
+-                    .map_or(i, |j| j);
+-                if (i + 1..=cluster_end).any(|j| !evictable(&spans[j])) {
+-                    continue;
+-                }
+-                record_drop(
+-                    i,
+-                    "old assistant turn",
+-                    spans,
+-                    &sizes,
+-                    &mut dropped,
+-                    &mut tokens_after,
+-                    &mut decisions,
+-                );
+-                // Drop trailing tool cluster if present (empty range
+-                // when cluster_end == i, i.e., no trailing cluster).
+-                for j in i + 1..=cluster_end {
++                if let Some(unit_idx) = unit_by_assistant[i] {
++                    let unit = &tool_units[unit_idx];
++                    if unit.iter().any(|&idx| !evictable(&spans[idx])) {
++                        continue;
++                    }
++                    for &idx in unit {
++                        let reason = if idx == i {
++                            "old assistant turn"
++                        } else {
++                            "tool cluster orphaned by assistant drop"
++                        };
++                        record_drop(
++                            idx,
++                            reason,
++                            spans,
++                            &sizes,
++                            &mut dropped,
++                            &mut tokens_after,
++                            &mut decisions,
++                        );
++                    }
++                } else {
+                     record_drop(
+-                        j,
+-                        "tool cluster orphaned by assistant drop",
++                        i,
++                        "old assistant turn",
+                         spans,
+                         &sizes,
+                         &mut dropped,
+@@ -361,12 +432,29 @@ impl CompactionPolicy for SpanFamilyDropPolicy {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::agent::types::{ContentBlock, ToolCall};
++    use crate::agent::ToolArgs;
+     use crate::context::rope::{RetentionClass, Span, SpanKind};
+ 
+     fn span(id: &str, kind: SpanKind, content: &str) -> Span {
+         Span::new(id, kind, content, RetentionClass::Warm)
+     }
+ 
++    fn assistant_with_tool_calls(id: &str, calls: &[&str]) -> Span {
++        let blocks = calls
++            .iter()
++            .map(|call_id| {
++                ContentBlock::ToolCall(ToolCall {
++                    id: (*call_id).to_owned(),
++                    name: "tool".to_owned(),
++                    arguments: ToolArgs::new(serde_json::json!({})).unwrap(),
++                })
++            })
++            .collect();
++        Span::new(id, SpanKind::Assistant, "0123456789", RetentionClass::Warm)
++            .with_blocks(blocks)
++    }
++
+     fn dropped_ids(result: &CompactionResult) -> Vec<&str> {
+         result
+             .decisions
+@@ -545,6 +633,37 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn fanout_tool_exchange_drops_by_call_id_not_adjacency() {
++        // One assistant turn emits two tool_use blocks. Its tool_results
++        // are reordered and separated by unrelated spans; dropping only an
++        // adjacent cluster would orphan either the assistant tool_use or one
++        // result. The whole exchange must share drop status.
++        let rope = RetainedRope::from_spans(vec![
++            span("sys", SpanKind::System, "system prompt"),
++            assistant_with_tool_calls("a_tools", &["call-1", "call-2"]),
++            span(
++                "msg-4-tool-result:call-2",
++                SpanKind::ToolResult,
++                "result two 0123456789",
++            ),
++            span("u_between", SpanKind::User, "unrelated user text"),
++            span("a_recent_1", SpanKind::Assistant, "recent assistant one"),
++            span(
++                "msg-6-tool-result:call-1",
++                SpanKind::ToolResult,
++                "result one 0123456789",
++            ),
++            span("a_recent_2", SpanKind::Assistant, "recent assistant two"),
++        ]);
++
++        let result = SpanFamilyDropPolicy::new().compact(&rope, 0);
++        let dropped = dropped_ids(&result);
++        assert!(dropped.contains(&"a_tools"));
++        assert!(dropped.contains(&"msg-4-tool-result:call-2"));
++        assert!(dropped.contains(&"msg-6-tool-result:call-1"));
++    }
++
+     #[test]
+     fn preserves_two_most_recent_assistant_turns() {
+         // Five Assistant turns; only a4/a5 (most recent 2) survive.

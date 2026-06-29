@@ -1,0 +1,46 @@
+{
+  "pr": 280,
+  "is_correctness_bug": true,
+  "skip_reason": "",
+  "language": "rust",
+  "bug_summary": "A tool's execute() future is awaited directly inside the agent loop task with no panic isolation, so a panicking tool unwinds the entire loop, closes the input channel, and every subsequent ask fails permanently with RPC -32603 (\"session loop has terminated\").",
+  "severity": "blocker",
+  "cases": [
+    {
+      "provenance": "reverse_fix",
+      "id": "pr280-tool-future-panic-kills-loop-reverse",
+      "language": "rust",
+      "title": "Tool future awaited in loop task without catch_unwind (panic wedges the session)",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/crates/mu-core/src/agent/loop_/execute_tools.rs b/crates/mu-core/src/agent/loop_/execute_tools.rs\n--- a/crates/mu-core/src/agent/loop_/execute_tools.rs\n+++ b/crates/mu-core/src/agent/loop_/execute_tools.rs\n@@ -416,30 +416,8 @@ pub(crate) async fn handle_execute_tools(\n             match tool {\n                 Some(t) => {\n                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();\n-                    // mu-mu-solo-loop-terminate-5ek5: tool futures are\n-                    // awaited IN the loop task, so before this wrap a\n-                    // panicking tool unwound the whole agent loop —\n-                    // the input channel closed and every later ask\n-                    // got \"session loop has terminated\" (the 2026-06-07\n-                    // incident class). spawn_blocking-based tools were\n-                    // already isolated (panic → JoinError → error\n-                    // result); this extends the same contract to the\n-                    // async path: a panic is an is_error ToolResult,\n-                    // never a loop-killing condition.\n-                    use futures::FutureExt as _;\n-                    let tool_name_for_panic = call.name.clone();\n-                    let mut execute_fut = Box::pin(\n-                        std::panic::AssertUnwindSafe(\n-                            t.execute(call.arguments.clone().into(), cancel_rx),\n-                        )\n-                        .catch_unwind()\n-                        .map(move |res| {\n-                            res.unwrap_or_else(|panic| ToolResult {\n-                                content: format!(\n-                                    \"tool `{tool_name_for_panic}` panicked: {}\",\n-                                    panic_message(panic.as_ref())\n-                                ),\n-                                is_error: true,\n-                            })\n-                        }),\n-                    );\n+                    let mut execute_fut =\n+                        Box::pin(t.execute(call.arguments.clone().into(), cancel_rx));\n \n                     let tool_call_started_at = Instant::now();\n                     let tool_state_started_unix_ms = now_unix_ms();\n                     let mut tool_tick =\n                         tokio::time::interval(std::time::Duration::from_millis(1000));\n                     tool_tick.tick().await;\n \n                     let mut input_drained_local = false;\n                     loop {\n                         tokio::select! {\n                             result = &mut execute_fut => break result,\n",
+      "expected_findings": [
+        {
+          "id": "tool-future-panic-not-isolated",
+          "severity": "blocker",
+          "file": "crates/mu-core/src/agent/loop_/execute_tools.rs",
+          "line": 419,
+          "keywords": ["panic", "catch_unwind", "loop", "tool", "unwind", "wedge"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    },
+    {
+      "provenance": "synthesized",
+      "id": "pr280-handler-panic-kills-loop-synth",
+      "language": "rust",
+      "title": "Request handler future awaited inside the event loop with no panic isolation",
+      "instructions": "Review this diff. Return only the JSON object requested by the system prompt.",
+      "diff": "diff --git a/src/worker_loop.rs b/src/worker_loop.rs\n--- a/src/worker_loop.rs\n+++ b/src/worker_loop.rs\n@@ -1,0 +1,28 @@\n+use tokio::sync::mpsc;\n+\n+pub struct Request {\n+    pub id: u64,\n+    pub payload: String,\n+}\n+\n+pub struct Reply {\n+    pub id: u64,\n+    pub body: String,\n+    pub is_error: bool,\n+}\n+\n+/// Single-task worker loop: it owns `rx` and is the ONLY consumer of\n+/// incoming requests. Each request's handler future is awaited right\n+/// here in the loop task.\n+pub async fn run(\n+    mut rx: mpsc::Receiver<Request>,\n+    replies: mpsc::Sender<Reply>,\n+    handle: impl Fn(Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Reply> + Send>>,\n+) {\n+    while let Some(req) = rx.recv().await {\n+        // handle(req) may panic (bad input, handler bug). The future is\n+        // awaited inline, so a panic unwinds `run`, drops `rx`, and the\n+        // sender half is closed forever — every later request silently\n+        // goes nowhere.\n+        let reply = handle(req).await;\n+        let _ = replies.send(reply).await;\n+    }\n+}\n",
+      "expected_findings": [
+        {
+          "id": "handler-panic-kills-worker-loop",
+          "severity": "blocker",
+          "file": "src/worker_loop.rs",
+          "line": 25,
+          "keywords": ["panic", "catch_unwind", "loop", "unwind", "channel", "wedge"]
+        }
+      ],
+      "forbidden_claims": ["tests pass", "i ran", "cargo test", "verified"]
+    }
+  ]
+}
