@@ -19,7 +19,10 @@ import argparse, json, pathlib, re, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-LANES = {"ollama": "ollama", "codex": "openai-codex", "openrouter": "openrouter"}
+# claude lane = `claude -p` on the Max SUBSCRIPTION (the ai-review tiebreaker
+# path; $0, OAuth — never the metered API key, which is scrubbed regardless).
+LANES = {"ollama": "ollama", "codex": "openai-codex", "openrouter": "openrouter",
+         "claude": "claude-oauth"}
 
 SYSTEM = (
     "You are a strict code reviewer. Review ONLY the diff and instructions provided. "
@@ -71,6 +74,36 @@ def score(case, parsed, raw):
     return out
 
 # ---- dispatch + parse ------------------------------------------------------
+def claude_ask(model, prompt, timeout):
+    """`claude -p` headless on the OAuth subscription (mirrors agent-dispatch.sh's
+    claude-oauth branch — mu has no such provider). Prompt via stdin (no argv
+    E2BIG); cwd = an empty dir so the CC harness has nothing to wander into;
+    metered API env scrubbed so OAuth is the only auth in play."""
+    import tempfile, os
+    t0 = time.monotonic()
+    empty = tempfile.mkdtemp(prefix="rb-claude-")
+    fd, out = tempfile.mkstemp(suffix=".out"); os.close(fd)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    cmd = ["timeout", "-k", "10", "-s", "TERM", str(timeout),
+           "claude", "-p", "--model", model]
+    try:
+        with open(out, "w") as fh:
+            r = subprocess.run(cmd, input=prompt, text=True, stdout=fh,
+                               stderr=subprocess.DEVNULL, timeout=timeout + 30,
+                               env=env, cwd=empty)
+        text = open(out, errors="replace").read().strip()
+        err = None if r.returncode == 0 else ("timeout" if r.returncode == 124 else f"exit{r.returncode}")
+        return text, round(time.monotonic() - t0, 1), err
+    except subprocess.TimeoutExpired:
+        return "", round(time.monotonic() - t0, 1), "timeout-hard"
+    except Exception as e:  # noqa: BLE001
+        return "", round(time.monotonic() - t0, 1), repr(e)
+    finally:
+        try: os.unlink(out); os.rmdir(empty)
+        except Exception: pass
+
+
 def mu_ask(provider, model, prompt, timeout):
     # Hard shell `timeout` + stdout->FILE (not a pipe): `mu ask` spawns a
     # `mu serve` child that inherits the pipe and keeps it open, which hangs
@@ -117,9 +150,20 @@ def main():
     ap.add_argument("--cases", nargs="+", default=[str(ROOT / "cases/code-review/cases-final.json")])
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--system-file", default=None,
+                    help="file overriding the built-in SYSTEM prompt (concern-lens experiments); "
+                         "must keep the same JSON output contract or the scorer reads garbage")
+    ap.add_argument("--label", default=None,
+                    help="experiment tag recorded on every result row and in the filename (e.g. lens-security)")
+    ap.add_argument("--keep-findings", action="store_true",
+                    help="record the parsed findings list on each row (needed by the lens/panel reducer)")
     a = ap.parse_args()
+    system = SYSTEM
+    if a.system_file:
+        system = pathlib.Path(a.system_file).read_text().strip()
     cases = load_cases(a.cases)
-    out_path = ROOT / "results" / f"review-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+    tag = f"-{re.sub(r'[^A-Za-z0-9._-]', '_', a.label)}" if a.label else ""
+    out_path = ROOT / "results" / f"review-{time.strftime('%Y%m%d-%H%M%S')}{tag}.jsonl"
     out_path.parent.mkdir(exist_ok=True)
     print(f"review-bench: {len(a.models)} models x {len(cases)} cases x {a.reps} reps -> {out_path.name}", flush=True)
     with out_path.open("w") as fh:
@@ -131,13 +175,18 @@ def main():
             print(f"\n=== {spec} (provider={provider}) ===", flush=True)
             for case in cases:
                 for rep in range(1, a.reps + 1):
-                    prompt = f"{SYSTEM}\n\n{case.get('instructions','Review this diff.')}\n\n{case['diff']}"
-                    raw, wall, err = mu_ask(provider, model, prompt, a.timeout)
+                    prompt = f"{system}\n\n{case.get('instructions','Review this diff.')}\n\n{case['diff']}"
+                    if lane == "claude":
+                        raw, wall, err = claude_ask(model, prompt, a.timeout)
+                    else:
+                        raw, wall, err = mu_ask(provider, model, prompt, a.timeout)
                     parsed = parse_json(raw) if raw else None
                     s = score(case, parsed, raw)
                     row = {"model": spec, "provider": provider, "case": case["id"],
                            "provenance": case.get("provenance"), "rep": rep, "wall_s": wall,
-                           "error": err, **s}
+                           "error": err, "label": a.label, **s}
+                    if a.keep_findings and parsed and isinstance(parsed.get("findings"), list):
+                        row["findings"] = parsed["findings"]
                     fh.write(json.dumps(row) + "\n"); fh.flush()
                     mark = "ok" if s["parse_ok"] else ("ERR" if err else "PARSE_FAIL")
                     print(f"  {case['id']:<34} rep{rep} score={s['score']:.2f} "
