@@ -74,6 +74,24 @@ def dispatch(lane, model, prompt, wt, timeout):
         try: os.unlink(of)
         except Exception: pass
 
+def prewarm(model, load_timeout):
+    """Load the ollama model and WAIT until it answers before any timed work. A
+    non-empty reply = resident + responding (a loaded model always emits output).
+    Empty/timeout => it never loaded; caller records load_fail, not a score."""
+    import tempfile
+    fd, of = tempfile.mkstemp(suffix=".out"); os.close(fd)
+    cmd = ["timeout", "-k", "15", "-s", "TERM", str(load_timeout), "mu", "ask", "--bare",
+           "--provider", "ollama", "--model", model, "Reply with exactly: ready"]
+    try:
+        with open(of, "w") as fh:
+            subprocess.run(cmd, stdout=fh, stderr=subprocess.DEVNULL, timeout=load_timeout + 30)
+        return bool(open(of, errors="replace").read().strip())
+    except Exception:
+        return False
+    finally:
+        try: os.unlink(of)
+        except Exception: pass
+
 def cargo_score(wt, cs, c, timeout):
     # inject the hidden test into the worker's workspace, then build+test
     p = os.path.join(wt, c["path"])
@@ -98,6 +116,7 @@ def main():
     ap.add_argument("--cases", nargs="+", default=list(CASES))
     ap.add_argument("--worker-timeout", type=int, default=600)
     ap.add_argument("--score-timeout", type=int, default=1500)
+    ap.add_argument("--load-timeout", type=int, default=300, help="budget to load+confirm an ollama model resident before timing work")
     a = ap.parse_args()
     os.makedirs(f"{CBENCH}/tmp", exist_ok=True)  # native temp dir (off restricted /tmp)
     if not os.path.isdir(f"{CBENCH}/target-shared"):
@@ -115,6 +134,12 @@ def main():
                 if lane not in LANES:
                     print(f"  !! unknown lane {lane!r}; skip", flush=True); continue
                 slug = f"{cs}-{model}".replace(":", "_").replace("/", "_").replace(".", "")
+                # Pre-warm: load + confirm the model answers BEFORE timing work.
+                # Empty reply => never loaded; record load_fail, do NOT score it.
+                if lane == "ollama" and not prewarm(model, a.load_timeout):
+                    print(f"  {cs:<7} {spec_model:<26} LOAD_FAIL (no reply in {a.load_timeout}s; dispatch failure, not a capability score)", flush=True)
+                    fh.write(json.dumps({"model": spec_model, "case": cs, "score": None, "reason": "load_fail", "wall_s": a.load_timeout}) + "\n"); fh.flush()
+                    continue
                 name = f"cb_{slug}"; wt = f"{CBENCH}/{name}"
                 jj("workspace", "forget", name); sh("rm", "-rf", wt)
                 add = jj("workspace", "add", "--name", name, wt, "-r", c["base"])
@@ -135,9 +160,12 @@ def main():
     from collections import defaultdict
     agg = defaultdict(list)
     for r in rows: agg[r["model"]].append((r["case"], r["score"]))
-    print(f"\n{'model':<28}{'avg':>6}  per-case")
+    print(f"\n{'model':<28}{'avg':>6}  per-case (LOAD_FAIL = never loaded, excluded from avg)")
     for m, cs in agg.items():
-        print(f"{m:<28}{sum(s for _, s in cs)/max(1,len(cs)):>6.2f}  {dict(cs)}")
+        scored = [(c, s) for c, s in cs if s is not None]
+        avg = sum(s for _, s in scored) / len(scored) if scored else float("nan")
+        disp = {c: (s if s is not None else "LOAD_FAIL") for c, s in cs}
+        print(f"{m:<28}{avg:>6.2f}  {disp}")
 
 if __name__ == "__main__":
     sys.exit(main())
