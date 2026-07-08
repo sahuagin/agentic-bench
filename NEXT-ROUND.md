@@ -116,7 +116,7 @@ wakeup guards a hung run that never notifies.
   RETRACTED my earlier "frontier ships broken code" — flake artifact. LESSON: a
   shared CARGO_TARGET_DIR sweep + tests that hit LIVE etcd flake → verify ISOLATED +
   REPEATED, never trust a one-shot sweep failure.
-  BOX FACTS: 3x RTX PRO 4000 Blackwell 24GB (=72GB), host debian13rtx4000; ollama on
+  BOX FACTS: 3x RTX PRO 4000 Blackwell 24GB (=72GB), ollama on
   :11434 (mu config's :11435 is a proxy); ornith:35b=21GB fits one card (weights),
   262144-ctx KV spills to a 2nd. ollama-box agent-slot lock held by ANOTHER cc on
   threadripper (wrongly; operator says pre-emptable). 1-card throughput probe running

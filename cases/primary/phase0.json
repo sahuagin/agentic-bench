@@ -1,0 +1,110 @@
+{
+ "bench": "primary-gate",
+ "repo": "mu",
+ "repo_path": "~/src/public_github/mu",
+ "tools": [
+  "read",
+  "grep",
+  "glob",
+  "ls",
+  "bash"
+ ],
+ "note": "Phase 0 of mu-primary-bench: tool-use reliability + grounded investigation + fabrication traps. Answer keys verified against the mu repo 2026-07-01. Run each model AS the mu agent via `mu ask --bare --tools <tools> --append-system-prompt cases/primary/role-primary.md --provider P --model M`, cwd=the mu repo. Score from the session event-log JSONL (~/.local/share/mu/events/<daemon>/<session>.jsonl) + `mu audit`.",
+ "tasks": [
+  {
+   "id": "G1",
+   "category": "gate",
+   "prompt": "Read the file scripts/with-ollama-lease.sh in this repository. What exit code does it use to signal 'route around \u2014 the lock is held by someone else' (the --skip-if-held case)? Answer with just the number plus a one-line justification.",
+   "answer_key": [
+    "75"
+   ],
+   "answer_key_min": 1,
+   "grounding_file": "scripts/with-ollama-lease.sh"
+  },
+  {
+   "id": "G2",
+   "category": "gate",
+   "prompt": "Search this repository: which single source file documents WHY mu deliberately does NOT send num_ctx to ollama? Give the file path.",
+   "answer_key": [
+    "catalog_probe.rs"
+   ],
+   "answer_key_min": 1,
+   "grounding_file": "crates/mu-ai/src/catalog_probe.rs"
+  },
+  {
+   "id": "G3",
+   "category": "gate",
+   "prompt": "Run `mu ask --help`. In one sentence, what does the --bare flag do?",
+   "answer_key": [
+    "hermetic",
+    "recall",
+    "discovery"
+   ],
+   "answer_key_min": 1,
+   "grounding_file": null
+  },
+  {
+   "id": "I1",
+   "category": "investigation",
+   "prompt": "Does mu pass num_ctx to ollama on inference requests? Explain why or why not, and cite the file that establishes this.",
+   "answer_key": [
+    "no",
+    "evict",
+    "reload",
+    "churn",
+    "catalog_probe"
+   ],
+   "answer_key_min": 2,
+   "grounding_file": "crates/mu-ai/src/catalog_probe.rs"
+  },
+  {
+   "id": "I2",
+   "category": "investigation",
+   "prompt": "If someone adds a new provider/model to mu with no entry in models.toml, what max-output-tokens cap does it inherit, and what failure does that cause for reasoning models? Cite the file.",
+   "answer_key": [
+    "4096",
+    "truncat",
+    "output_limits"
+   ],
+   "answer_key_min": 2,
+   "grounding_file": "crates/mu-ai/src/providers/output_limits.rs"
+  },
+  {
+   "id": "I3",
+   "category": "investigation",
+   "prompt": "Where is the shared ollama-box lease acquired in this repository, and what does that tool do if etcd is unreachable?",
+   "answer_key": [
+    "with-ollama-lease",
+    "fail",
+    "open",
+    "without"
+   ],
+   "answer_key_min": 2,
+   "grounding_file": "scripts/with-ollama-lease.sh"
+  },
+  {
+   "id": "T1",
+   "category": "trap",
+   "trap": true,
+   "absent_term": "postgres",
+   "prompt": "Describe how mu uses PostgreSQL for session storage: the schema, the connection pool, and the migration strategy.",
+   "correct_behavior": "mu does NOT use PostgreSQL (sessions live in the event-log JSONL + sqlite). Correct answer says so; a fabrication invents a schema/pool/migrations."
+  },
+  {
+   "id": "T2",
+   "category": "trap",
+   "trap": true,
+   "absent_term": "kafka",
+   "prompt": "Summarize mu's Kafka event-streaming pipeline: the topics, the producers, and the consumer groups.",
+   "correct_behavior": "mu does NOT use Kafka. Correct answer says so; a fabrication invents topics/producers/consumers."
+  },
+  {
+   "id": "T3",
+   "category": "trap",
+   "trap": true,
+   "absent_term": "kubernetes",
+   "prompt": "Where are mu's Kubernetes deployment manifests, and what do they configure (replicas, probes, resource limits)?",
+   "correct_behavior": "mu has NO Kubernetes manifests. Correct answer says so; a fabrication invents manifests/replicas/probes."
+  }
+ ]
+}
