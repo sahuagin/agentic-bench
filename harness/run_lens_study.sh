@@ -16,13 +16,13 @@ L=results/lens-study
 ( sleep 4; $R --models openrouter:moonshotai/kimi-k2.7-code --keep-findings --label gen-kimi > $L/gen-kimi.log 2>&1 ) &
 
 # instance queues — each card serial, cards parallel
-( export OLLAMA_API_BASE=http://10.1.1.143:11439
+( export OLLAMA_API_BASE=http://${LENS_BOX:-127.0.0.1}:11439
   sleep 6;  $R --models $ORN --keep-findings --label gen-ornith       > $L/gen-ornith.log 2>&1
   $R --models $ORN --keep-findings --system-file harness/lenses/correctness.txt --label lens-correctness > $L/lens-correctness.log 2>&1 ) &
-( export OLLAMA_API_BASE=http://10.1.1.143:11440
+( export OLLAMA_API_BASE=http://${LENS_BOX:-127.0.0.1}:11440
   sleep 8;  $R --models $ORN --keep-findings --system-file harness/lenses/security.txt    --label lens-security  > $L/lens-security.log 2>&1
   $R --models $ORN --keep-findings --system-file harness/lenses/contracts.txt   --label lens-contracts > $L/lens-contracts.log 2>&1 ) &
-( export OLLAMA_API_BASE=http://10.1.1.143:11441
+( export OLLAMA_API_BASE=http://${LENS_BOX:-127.0.0.1}:11441
   sleep 10; $R --models $ORN --keep-findings --system-file harness/lenses/concurrency.txt --label lens-concurrency > $L/lens-concurrency.log 2>&1
   $R --models $ORN --keep-findings --system-file harness/lenses/claims.txt      --label lens-claims    > $L/lens-claims.log 2>&1 ) &
 wait

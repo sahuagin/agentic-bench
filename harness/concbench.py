@@ -20,9 +20,9 @@ Env: CB_MODEL (default ornith:9b), CB_NCTX (default 262144), CB_EP (endpoint).
 Run under the ollama-box lock (with-ollama-lease) and HOLD it for the whole
 sweep, so nothing evicts the model mid-run.
 """
-import concurrent.futures, urllib.request, json, time, os
+import os,  concurrent.futures, urllib.request, json, time, os
 
-EP = os.environ.get("CB_EP", "http://10.1.1.143:11434")
+EP = os.environ.get("CB_EP", "http://127.0.0.1:11434")
 MODEL = os.environ.get("CB_MODEL", "ornith:9b")
 NCTX = int(os.environ.get("CB_NCTX", "262144"))
 PROMPT = ("Write about 400 words explaining how a write-ahead log ensures durability and "

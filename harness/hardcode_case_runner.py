@@ -9,10 +9,10 @@ recurring pain: do models retire the hardcoded const, or keep hardcoding?
 Pre-warms ollama models; empty/timeout dispatch = LOAD failure (never scored).
 jj workspace per model (forget + rm). Reuses review_runner's mu_ask + parser.
 """
-import sys, json, subprocess, pathlib, time, argparse, os
+import os,  sys, json, subprocess, pathlib, time, argparse, os
 HERE = pathlib.Path(__file__).resolve().parent; ROOT = HERE.parent
 sys.path.insert(0, str(HERE)); import review_runner as rr
-MU = "/home/tcovert/src/public_github/mu"
+MU = os.path.expanduser("~/src/public_github/mu")
 SPEC = (ROOT / "cases/coding/spec-hardcode-dangerverbs.md").read_text()
 _ws = ROOT / "cases/coding/worker-sys.md"
 WORKER_SYS = _ws.read_text() if _ws.exists() else "You are a senior Rust engineer. Implement the task by editing the repo files. Make the change idiomatic, complete, and consistent with the codebase."

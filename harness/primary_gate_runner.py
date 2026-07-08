@@ -64,7 +64,7 @@ def main():
     a = ap.parse_args()
 
     spec = json.loads(CASES.read_text())
-    tools_csv = ",".join(spec["tools"]); repo = spec["repo_path"]
+    tools_csv = ",".join(spec["tools"]); repo = os.path.expanduser(spec["repo_path"])
     tasks = spec["tasks"]
     if a.tasks:
         want = set(a.tasks.split(",")); tasks = [t for t in tasks if t["id"] in want]

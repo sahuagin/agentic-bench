@@ -9,9 +9,9 @@ warm shared target so only the touched crate recompiles.
 Answers, concretely: does the diff even apply? does it compile? do the tests pass?
 A lens "data_driven" with a `cargo check` failure = right idea, didn't actually work.
 """
-import sys, subprocess, os, argparse, pathlib, time
+import os,  sys, subprocess, os, argparse, pathlib, time
 
-MU = "/home/tcovert/src/public_github/mu"
+MU = os.path.expanduser("~/src/public_github/mu")
 CBENCH = os.path.expanduser("~/cbench")
 
 def sh(*a, cwd=None, timeout=1800, env=None, stdin=None):
