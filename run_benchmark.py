@@ -34,7 +34,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 MU_BINARY = pathlib.Path.home() / "src/public_github/mu/target/release/mu"
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 DEFAULT_MODELS = ["gpt-oss:20b", "qwen3-coder:30b", "qwen3.6:35b-a3b-q8_0"]
-RUN_TIMEOUT_S = 420  # cold loads of the 38GB q8_0 need headroom
+RUN_TIMEOUT_S = 420  # per-case budget for a WARM model; loads happen in warmup()
+WARMUP_TIMEOUT_S = 1800  # PCIe3 x4 box: ~13min measured for a 65GB model; scale, don't guess
 LEAK_RE = re.compile(r"<function=|</?tool_call>")
 
 
@@ -53,6 +54,22 @@ def evict_all():
             print(f"  evicted: {', '.join(loaded)}", flush=True)
     except Exception as e:  # noqa: BLE001 — eviction is best-effort
         print(f"  evict_all: {e} (continuing)", flush=True)
+
+
+def warmup(model: str):
+    """Load the model OUTSIDE scored reps so a slow cold load (a hardware
+    property on this box, not a model failure) can't register as a wrong
+    answer against a per-case timeout sized for warm inference."""
+    t0 = time.monotonic()
+    body = json.dumps({"model": model, "prompt": "", "num_predict": 1}).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA}/api/generate", data=body,
+        headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=WARMUP_TIMEOUT_S).read()
+        print(f"  warmup: loaded in {time.monotonic() - t0:.0f}s", flush=True)
+    except Exception as e:  # noqa: BLE001 — a failed warmup surfaces in case timings
+        print(f"  warmup: {e} (continuing; first reps may absorb the load)", flush=True)
 
 
 def fixture_commit(repo: str) -> str:
@@ -117,6 +134,7 @@ def main() -> int:
         for model in models:
             print(f"\n=== {model} ===", flush=True)
             evict_all()
+            warmup(model)
             for case in cases:
                 for rep in range(1, args.reps + 1):
                     r = run_case(model, repo, case["prompt"])
