@@ -1,0 +1,1 @@
+How long does the Nimbus 3 protocol wait during connection setup before it gives up? Give the value in milliseconds, as a number only.
