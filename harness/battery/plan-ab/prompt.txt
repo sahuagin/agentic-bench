@@ -1,0 +1,10 @@
+You are working in the Rust crate `durparse` in the current directory (Cargo.toml, src/lib.rs, tests/).
+
+Feature request. `parse_duration` currently accepts one `<number><unit>` term with the units s, m and h. Extend it so that it also accepts:
+- compound strings made of several terms, optionally separated by spaces, whose values are summed: "1h30m", "2h 15m 10s", "1s500ms";
+- the units `d` (days) and `ms` (milliseconds);
+- and treats a number with no unit ("42", "1h30") as an error: add a `ParseError::MissingUnit` variant for it.
+
+Existing behaviour must keep working: whitespace trimming, the Empty / MissingNumber / UnknownUnit / Overflow errors, and no panics on any input.
+
+The tests under tests/ specify the feature; tests/compound.rs currently fails. Do not modify anything under tests/. The whole test suite must pass.
