@@ -1,0 +1,1 @@
+I am setting up the Zephyr seven component and need its recorded tuning constant. What number was logged for it? Reply with only the number.

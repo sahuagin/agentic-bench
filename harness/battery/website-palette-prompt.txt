@@ -1,0 +1,819 @@
+﻿You are acting as a senior full-stack developer, product strategist, UX designer, and SEO-minded builder.
+
+
+Build a simple, polished, production-ready website called “Color Palette Generator”.
+
+
+The website should be a fast, client-side color palette generator for designers, developers, marketers, content creators, indie hackers, students, and anyone who needs attractive color combinations quickly.
+
+
+The site should work as a standalone web app inside this repo. Make reasonable decisions without asking follow-up questions unless something is truly blocking.
+
+
+PROJECT GOAL
+
+
+Create a clean, modern website where users can generate beautiful color palettes, copy color codes, lock individual colors, export palettes, check basic accessibility contrast, and save favorite palettes locally.
+
+
+The site should feel like a useful free design tool, not a generic landing page.
+
+
+WHAT THE WEBSITE DOES
+
+
+The website lets users:
+
+
+1. Generate a 5-color palette instantly.
+2. Generate a random palette.
+3. Enter a seed color using a HEX input or color picker.
+4. Choose a harmony mode:
+   - Random
+   - Monochromatic
+   - Analogous
+   - Complementary
+   - Triadic
+   - Tetradic
+   - Pastel
+   - Vibrant
+   - Dark
+5. Lock individual colors so they stay unchanged when generating again.
+6. Copy a color value with one click.
+7. View each color as:
+   - HEX
+   - RGB
+   - HSL
+8. See basic contrast guidance for text on each color:
+   - Best text color: black or white
+   - Contrast ratio against black
+   - Contrast ratio against white
+   - Simple WCAG-style label: “Good for text”, “Use carefully”, or “Decorative only”
+9. Export the palette as:
+   - CSS variables
+   - Tailwind config snippet
+   - JSON
+   - SVG swatch strip
+10. Save favorite palettes in localStorage.
+11. Reopen saved palettes.
+12. Delete saved palettes.
+13. Share a palette through a URL query string, for example:
+   - /?palette=264653,2A9D8F,E9C46A,F4A261,E76F51
+
+
+WHO IT IS FOR
+
+
+Primary users:
+- UI designers who need quick palette inspiration.
+- Front-end developers who want color variables for projects.
+- Founders and indie hackers making landing pages.
+- Marketers and content creators choosing brand colors.
+- Students learning design basics.
+
+
+User intent:
+- “Give me a good color palette fast.”
+- “Let me copy these colors into my project.”
+- “Help me avoid unreadable color combinations.”
+- “Let me save or share this palette.”
+
+
+MAIN USER FLOW
+
+
+1. User lands on the homepage.
+2. The main palette generator is visible above the fold.
+3. User clicks “Generate palette”.
+4. The app displays five large color cards.
+5. User can:
+   - Copy color codes.
+   - Lock colors they like.
+   - Change harmony mode.
+   - Enter a seed color.
+   - Regenerate only unlocked colors.
+6. User opens the export panel.
+7. User copies CSS variables, Tailwind config, JSON, or downloads SVG.
+8. User saves the palette to favorites.
+9. User can revisit saved palettes lower on the page.
+10. User can share the current palette with a URL.
+
+
+CORE FEATURE
+
+
+The core feature is an interactive 5-color palette generator with locking, harmony modes, copy/export actions, and lightweight accessibility feedback.
+
+
+Do not rely on external APIs for palette generation. Generate palettes locally in the browser.
+
+
+TECH STACK
+
+
+Use this stack unless the existing repo already clearly uses something else:
+
+
+- Next.js with App Router
+- TypeScript
+- Tailwind CSS
+- React components
+- localStorage for saved palettes
+- No database for the MVP
+- No authentication
+- No paid API calls
+- No backend required unless needed for metadata routes
+- Use simple utility functions for color math
+- Use accessible HTML and keyboard-friendly controls
+
+
+If this is not already a Next.js project, initialize the app structure needed for a Next.js TypeScript project.
+
+
+Use a clean file structure, for example:
+
+
+/app
+  /page.tsx
+  /layout.tsx
+  /privacy/page.tsx
+  /terms/page.tsx
+  /globals.css
+/components
+  /PaletteGenerator.tsx
+  /ColorCard.tsx
+  /ExportPanel.tsx
+  /SavedPalettes.tsx
+  /SeoContent.tsx
+  /Header.tsx
+  /Footer.tsx
+/lib
+  /color.ts
+  /palette.ts
+  /storage.ts
+  /export.ts
+  /seo.ts
+/public
+  /icon.svg
+  /og-image.svg
+
+
+DESIGN DIRECTION
+
+
+Overall style:
+- Modern, minimal, playful, and polished.
+- The color palettes should be the visual hero.
+- Use generous spacing, rounded cards, soft shadows, and subtle borders.
+- Avoid visual clutter.
+- The tool should feel useful within 3 seconds.
+
+
+Layout:
+- Sticky or simple top navigation with brand name.
+- Hero section with:
+  - H1: “Color Palette Generator”
+  - Subheading: “Create beautiful, accessible color palettes for websites, brands, and apps in seconds.”
+  - Generator controls
+- Large 5-card palette display.
+- Export panel below or beside palette on desktop.
+- Saved palettes section.
+- Educational SEO content below the tool.
+- FAQ section.
+- Footer with Privacy and Terms links.
+
+
+Visual choices:
+- Background: soft neutral, such as #F8FAFC or #FAFAF9.
+- Text: near-black, such as #111827.
+- Cards: white with subtle borders.
+- Accent color can be generated or use a tasteful blue/purple gradient.
+- Use responsive design:
+  - Desktop: palette cards in a horizontal row.
+  - Tablet: cards wrap.
+  - Mobile: stacked cards with large tap targets.
+
+
+UX DETAILS
+
+
+Palette controls:
+- “Generate palette” primary button.
+- “Randomize” secondary button.
+- Harmony mode dropdown or segmented control.
+- Seed color input with:
+  - Native color picker
+  - HEX text input
+- “Clear locks” button.
+- “Save palette” button.
+- “Share palette” button that copies current URL.
+
+
+Color card:
+Each color card should show:
+- Large color swatch area.
+- HEX value.
+- RGB and HSL values, either always visible or expandable.
+- Copy buttons.
+- Lock/unlock button.
+- Text color recommendation: black or white.
+- Contrast status.
+
+
+Interactions:
+- Clicking a HEX code copies it.
+- Show a small “Copied!” state after copying.
+- Locking a color visually changes the lock icon or label.
+- If a color is locked, regeneration should preserve it.
+- Saved palettes should persist across reloads using localStorage.
+- URL palette should load automatically if valid.
+
+
+ACCESSIBILITY
+
+
+- Use semantic buttons, labels, and form controls.
+- All buttons must be keyboard accessible.
+- Provide visible focus states.
+- Ensure text contrast in the UI is good.
+- For each generated color, calculate whether black or white text is more readable.
+- Do not claim full accessibility certification.
+- Use aria-live politely for copy success messages if appropriate.
+- Avoid color-only meaning. Use labels/icons plus text.
+
+
+COLOR LOGIC REQUIREMENTS
+
+
+Create robust color utility functions in /lib/color.ts:
+
+
+Functions should include:
+- normalizeHex(input): returns valid 6-character uppercase HEX with # removed or null.
+- hexToRgb(hex)
+- rgbToHex(r, g, b)
+- rgbToHsl(r, g, b)
+- hslToRgb(h, s, l)
+- hslToHex(h, s, l)
+- getRelativeLuminance(rgb)
+- getContrastRatio(colorA, colorB)
+- getBestTextColor(hex): returns black or white
+- isValidHex(input)
+
+
+Palette generation in /lib/palette.ts:
+- generatePalette(options)
+- generateRandomPalette()
+- generateMonochromatic(seed)
+- generateAnalogous(seed)
+- generateComplementary(seed)
+- generateTriadic(seed)
+- generateTetradic(seed)
+- generatePastel(seed optional)
+- generateVibrant(seed optional)
+- generateDark(seed optional)
+- applyLocks(existingPalette, newPalette, lockedMap)
+
+
+Generation rules:
+- Always return exactly 5 colors.
+- Never return invalid HEX values.
+- Avoid palettes where all colors are nearly identical unless monochromatic mode is selected.
+- Keep hue values wrapped correctly between 0 and 360.
+- Clamp saturation and lightness safely.
+- If no seed color is provided, generate a random seed.
+- Preserve locked colors when regenerating.
+- If all 5 colors are locked and user clicks generate, show a friendly message: “Unlock a color to generate new options.”
+
+
+EXPORT FEATURES
+
+
+Create /lib/export.ts with functions:
+
+
+- paletteToCssVariables(palette)
+Example:
+:root {
+  --color-1: #264653;
+  --color-2: #2A9D8F;
+  --color-3: #E9C46A;
+  --color-4: #F4A261;
+  --color-5: #E76F51;
+}
+
+
+- paletteToTailwindConfig(palette)
+Example:
+theme: {
+  extend: {
+    colors: {
+      palette: {
+        1: '#264653',
+        2: '#2A9D8F',
+        3: '#E9C46A',
+        4: '#F4A261',
+        5: '#E76F51',
+      }
+    }
+  }
+}
+
+
+- paletteToJson(palette)
+- paletteToSvg(palette)
+
+
+Export panel:
+- Tabs or buttons for CSS, Tailwind, JSON, SVG.
+- Copy button for each text export.
+- Download button for SVG.
+- Keep the UI simple.
+
+
+SAVED PALETTES
+
+
+Use localStorage only.
+
+
+Create /lib/storage.ts:
+- getSavedPalettes()
+- savePalette(palette)
+- deleteSavedPalette(id)
+- clearSavedPalettes()
+
+
+Saved palette object:
+{
+  id: string,
+  colors: string[],
+  createdAt: string
+}
+
+
+Rules:
+- Avoid duplicate saved palettes.
+- Limit saved palettes to 24 most recent.
+- Show empty state: “No saved palettes yet. Save your favorite combinations here.”
+- Saved palettes should render compact swatches.
+- Clicking a saved palette loads it into the main generator.
+
+
+PAGE STRUCTURE
+
+
+Build these pages:
+
+
+1. Home page: /
+Sections:
+- Header
+- Hero and generator
+- Export panel
+- Saved palettes
+- “How to use this color palette generator”
+- “Why color palettes matter”
+- “Tips for choosing accessible colors”
+- FAQ
+- Footer
+
+
+2. Privacy page: /privacy
+Include simple privacy copy:
+- No account required.
+- Palette generation happens in the browser.
+- Saved palettes are stored locally in the user’s browser.
+- No personal information is required to use the tool.
+- If analytics are added later, disclose them before launch.
+
+
+3. Terms page: /terms
+Include simple terms:
+- Tool is provided for general creative and design use.
+- No guarantee that generated palettes are suitable for every brand, accessibility requirement, or legal use case.
+- Users are responsible for testing colors in their own context.
+- Generated palettes are not exclusive intellectual property.
+
+
+SEO SETUP
+
+
+Implement basic SEO:
+
+
+- Use meaningful metadata in app/layout.tsx.
+- Title:
+  “Color Palette Generator | Create Beautiful Color Schemes”
+- Description:
+  “Generate beautiful color palettes for websites, brands, apps, and creative projects. Copy HEX, RGB, HSL, CSS variables, Tailwind config, and more.”
+- Add canonical metadata.
+- Add Open Graph metadata.
+- Add Twitter card metadata.
+- Create a simple SVG or dynamic-looking static OG image in /public/og-image.svg.
+- Add robots.txt route or public file.
+- Add sitemap.xml route or public file with:
+  - /
+  - /privacy
+  - /terms
+- Use one H1 on the home page.
+- Use descriptive H2 sections.
+- Add FAQ content with structured data using JSON-LD.
+- Add WebApplication JSON-LD:
+  - name: Color Palette Generator
+  - applicationCategory: DesignApplication
+  - operatingSystem: Any
+  - offers: free
+- Keep page fast and mostly static.
+
+
+SEO CONTENT TO INCLUDE
+
+
+Add concise, helpful content below the generator.
+
+
+Suggested content:
+
+
+“How to use this color palette generator”
+- Start with a random palette or enter a seed color.
+- Choose a harmony mode.
+- Lock colors you like.
+- Regenerate the rest.
+- Copy HEX, RGB, HSL, CSS, or Tailwind values.
+- Save or share your palette.
+
+
+“Why color palettes matter”
+Explain that consistent colors make products feel more recognizable, polished, and easier to use.
+
+
+“Tips for choosing accessible colors”
+Explain:
+- Test text against backgrounds.
+- Use high contrast for body text.
+- Reserve low-contrast colors for decoration.
+- Check colors in the actual design context.
+- This tool gives guidance, but users should still test final designs.
+
+
+FAQ QUESTIONS
+
+
+Include an FAQ section with these questions:
+
+
+1. What is a color palette generator?
+2. Can I use these palettes for commercial projects?
+3. Are the generated palettes accessible?
+4. What color formats does this tool support?
+5. Can I save my palettes?
+6. Can I use this with Tailwind CSS?
+7. Does this tool store my palettes online?
+8. How many colors are in each palette?
+
+
+MONETIZATION PLAN
+
+
+Do not implement payments in the MVP, but structure the site so monetization can be added later.
+
+
+Recommended monetization:
+1. Display ads on SEO content sections after traffic grows.
+2. Affiliate links to design tools, UI kits, web hosting, domain registrars, and design courses.
+3. Sell premium downloadable palette packs.
+4. Offer a future Pro version with:
+   - Brand kit export
+   - More palette sizes
+   - Image-to-palette extraction
+   - Team sharing
+   - PDF brand guideline export
+   - Advanced accessibility checks
+
+
+For MVP:
+- Add a small non-intrusive “Coming soon: Pro exports and brand kits” note near the export panel or footer.
+- Do not block core functionality behind payment.
+- Do not add fake pricing pages.
+
+
+TRUST, PRIVACY, AND DISCLAIMER NOTES
+
+
+Include trust-focused microcopy:
+
+
+- “Runs in your browser.”
+- “No signup required.”
+- “Saved palettes stay on this device.”
+- “Accessibility guidance is a helpful starting point, not a full audit.”
+
+
+Privacy page must say:
+- The app does not require users to submit personal information.
+- Saved palettes use localStorage.
+- Clearing browser data may remove saved palettes.
+- Shared palette URLs include color values in the URL.
+- Users should not put sensitive information into palette names if palette naming is ever added.
+
+
+Disclaimer:
+- Generated colors are not guaranteed to be unique.
+- Generated palettes are not legal brand advice.
+- Accessibility labels are simplified and should be verified in real layouts.
+
+
+KEY EDGE CASES
+
+
+Handle these edge cases:
+
+
+1. Invalid HEX input:
+   - Show friendly validation.
+   - Do not crash.
+   - Example message: “Enter a valid HEX color like #4F46E5.”
+
+
+2. HEX input without #:
+   - Accept it and normalize it.
+
+
+3. Short HEX like #FFF:
+   - Accept and expand to #FFFFFF if you choose to support it.
+   - If not supporting short HEX, show clear validation.
+
+
+4. Locked colors:
+   - Preserve locked colors on generation.
+   - If all colors are locked, do not regenerate. Show a helpful message.
+
+
+5. localStorage unavailable:
+   - App should still work.
+   - Show message that saving is unavailable in this browser mode.
+
+
+6. Malformed URL palette:
+   - Ignore invalid colors.
+   - Fall back to a generated palette.
+
+
+7. Duplicate saved palette:
+   - Do not save the same exact palette twice.
+   - Instead show “Already saved.”
+
+
+8. Very light or very dark colors:
+   - Ensure text on cards remains readable by choosing black or white text.
+
+
+9. Mobile screens:
+   - Controls should not overflow.
+   - Cards should stack cleanly.
+
+
+10. Clipboard API unavailable:
+   - Gracefully fall back or show “Copy not available in this browser.”
+
+
+11. Hydration issues:
+   - localStorage should only be accessed client-side.
+
+
+12. No JavaScript disabled:
+   - At minimum, show the static page content.
+   - The generator can require JavaScript.
+
+
+IMPLEMENTATION PLAN
+
+
+Step 1: Inspect the repo
+- Check existing package.json and framework.
+- If the repo is empty or not already a compatible app, create a Next.js TypeScript app structure.
+- Install or configure Tailwind CSS if not present.
+- Keep dependencies minimal.
+
+
+Step 2: Create foundational utilities
+- Implement /lib/color.ts with color parsing, conversion, luminance, and contrast helpers.
+- Implement /lib/palette.ts with palette generation modes.
+- Implement /lib/export.ts with CSS, Tailwind, JSON, and SVG export helpers.
+- Implement /lib/storage.ts with safe localStorage wrappers.
+
+
+Step 3: Build UI components
+- Header
+- Footer
+- PaletteGenerator
+- ColorCard
+- ExportPanel
+- SavedPalettes
+- SeoContent
+- FAQ
+
+
+Step 4: Build the home page
+- Add hero and generator above the fold.
+- Add export panel.
+- Add saved palettes.
+- Add SEO content and FAQ.
+- Ensure responsive layout.
+
+
+Step 5: Add privacy and terms pages
+- Keep them simple, readable, and trust-building.
+- Link them in footer.
+
+
+Step 6: Add SEO metadata
+- Metadata in layout.
+- Open Graph and Twitter metadata.
+- robots.txt.
+- sitemap.xml.
+- JSON-LD for WebApplication and FAQ.
+
+
+Step 7: Add polish
+- Copy success states.
+- Lock states.
+- Empty states.
+- Friendly validation messages.
+- Responsive spacing.
+- Focus states.
+- Reduced-motion friendly transitions.
+
+
+Step 8: Add tests or verification
+- If the repo has a test setup, add unit tests for color utilities and palette generation.
+- If no test setup exists, at least add a simple script or comments and manually verify:
+  - npm run lint
+  - npm run build
+  - Palette generation
+  - Copy functionality
+  - Save/delete saved palettes
+  - URL palette loading
+  - Export formats
+
+
+Step 9: Run checks
+- Run formatting if available.
+- Run lint.
+- Run build.
+- Fix all errors.
+
+
+Step 10: Provide final summary
+- Summarize files changed.
+- Explain how to run locally.
+- Mention any assumptions or limitations.
+
+
+ACCEPTANCE CRITERIA
+
+
+The project is complete when:
+
+
+- The home page loads without errors.
+- User can generate a 5-color palette.
+- User can enter a seed HEX color.
+- User can choose harmony modes.
+- User can lock and unlock individual colors.
+- Locked colors persist through regeneration.
+- User can copy HEX, RGB, and HSL values.
+- User gets visible copy feedback.
+- User can export CSS variables.
+- User can export Tailwind config.
+- User can export JSON.
+- User can download SVG.
+- User can save palettes locally.
+- User can load saved palettes.
+- User can delete saved palettes.
+- Shared palette URLs work.
+- Invalid inputs are handled gracefully.
+- Site is responsive on mobile, tablet, and desktop.
+- Privacy and Terms pages exist.
+- SEO metadata, sitemap, robots, Open Graph, and JSON-LD are implemented.
+- npm run build succeeds.
+
+
+COPY REQUIREMENTS
+
+
+Use this exact core copy where appropriate:
+
+
+Hero H1:
+Color Palette Generator
+
+
+Hero subheading:
+Create beautiful, accessible color palettes for websites, brands, apps, and creative projects in seconds.
+
+
+Primary button:
+Generate palette
+
+
+Secondary button:
+Save palette
+
+
+Export heading:
+Export your palette
+
+
+Saved palettes heading:
+Saved palettes
+
+
+Trust microcopy:
+Runs in your browser. No signup required. Saved palettes stay on this device.
+
+
+Accessibility microcopy:
+Contrast guidance is a helpful starting point, not a full accessibility audit.
+
+
+DESIGN QUALITY BAR
+
+
+Make the site feel finished:
+- No bare default HTML.
+- No broken spacing.
+- No console errors.
+- No placeholder lorem ipsum.
+- No unused buttons.
+- No fake functionality.
+- No external palette API dependency.
+- No authentication.
+- No database.
+
+
+Use clean, readable code with thoughtful component boundaries.
+Prefer simple, maintainable code over clever abstractions.
+
+
+LAUNCH CHECKLIST
+
+
+After implementation, verify:
+
+
+Technical:
+- npm install works.
+- npm run dev works.
+- npm run build works.
+- No TypeScript errors.
+- No lint errors.
+- No console errors on page load.
+- Site works on Chrome, Safari, Firefox, and mobile viewport.
+- Clipboard actions fail gracefully if unavailable.
+- localStorage access does not cause hydration errors.
+
+
+Product:
+- The generator is visible immediately.
+- Palette generation feels fast.
+- Buttons are clear.
+- Saved palettes are easy to understand.
+- Export snippets are correct.
+- Share URLs work.
+
+
+UX:
+- Focus states are visible.
+- Mobile layout is clean.
+- Color card text is readable.
+- Copy feedback is obvious.
+- Error messages are friendly.
+
+
+SEO:
+- One H1 on home page.
+- Strong title and description.
+- Open Graph image exists.
+- sitemap.xml exists.
+- robots.txt exists.
+- Privacy and Terms pages are linked.
+- JSON-LD is valid.
+
+
+Trust and privacy:
+- No signup required.
+- localStorage behavior is disclosed.
+- Shared URL behavior is disclosed.
+- Accessibility disclaimer is visible.
+
+
+Final response:
+When finished, provide:
+1. A concise summary of what was built.
+2. The main files created or changed.
+3. The commands to run locally.
+4. Any known limitations.
+5. Suggested next improvements.
