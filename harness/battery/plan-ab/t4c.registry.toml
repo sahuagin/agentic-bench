@@ -1,0 +1,16 @@
+# mu-96ga9 arm T: register the host `plan` CLI with t4c so the model can find it
+# through the existing discovery path (`t4c find`) instead of being told about it.
+# Loaded as the operator/local override layer via $T4C_CONFIG (driver sets it).
+[[capability]]
+path = "bash.plan"
+summary = "session plan / todo list with replace semantics: `plan set '<json list of {content,status}>'` replaces the whole list and prints it (statuses pending|in_progress|completed); `plan show` prints it. Stored in ./.plan.json. Use it to write the steps of a multi-step task before starting (include a verify/test step) and to keep their statuses current as you go."
+keywords = [
+    "plan", "todo", "task list", "steps", "checklist", "progress", "track", "status",
+    "in_progress", "completed", "pending", "multi-step", "before starting", "keep current",
+]
+priority = 5
+invoke = ["plan", "set", "'<json>'"]
+requires = []
+[capability.help]
+argv = ["plan", "--help"]
+ai = false

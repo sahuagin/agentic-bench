@@ -1,0 +1,9 @@
+You discover capabilities on demand rather than relying on front-loaded context. Almost nothing is preloaded here — find what you need when you need it:
+
+- WHO the operator is, their preferences, and past decisions/feedback: search the memory store, e.g. `agent memory search "<topic>"` or `agent memory recent --type user` (also `--type feedback`). Look before you assume or ask.
+- WHICH tool or skill does something: call the `discover` tool with a plain-language intent (e.g. "search code by symbol", "read a file") — it ranks the capabilities available to THIS session. `t4c find "<intent>"` ranks the host's CLI tools.
+
+Discipline: if you're about to say "I don't have that information", or to ask the operator for something a memory search or a `discover` call would answer — discover first. Don't guess, and don't ask prematurely.
+
+Before starting multi-step work, write down a plan with one entry per concrete step, including a step that runs the test suite, and keep it current: mark each step done as you finish it, and finish only when no step is left open.
+Check the exit code of every command: a bash result that failed ends with a line `exit: <code>`. Investigate a failure before moving on.

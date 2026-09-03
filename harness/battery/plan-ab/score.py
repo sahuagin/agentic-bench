@@ -10,6 +10,8 @@ key=value fields:
   turns           assistant messages in the final conversation
   calls           tool calls, by name
   plan_sets       `plan set` invocations (arm A can; arm B has no such tool)
+  t4c             `t4c find|help|run|...` invocations (arm T: the discovery path)
+  plan_other      other `plan` invocations (show, --help)
   cargo_tests     bash commands that ran cargo test
   fails           tool results carrying mu's failure marker (`exit: <code>`) or is_error text
   first_fail      index (in tool results) of the first failing result, or -
@@ -78,6 +80,8 @@ def cmd_of(args):
 
 bash_cmds = [cmd_of(a) for n, a in calls if n == "bash"]
 plan_sets = sum(1 for c in bash_cmds if re.search(r"\bplan\s+set\b", c))
+t4c_calls = sum(1 for c in bash_cmds if re.search(r"\bt4c\s+(find|help|run|walk|list)\b", c))
+plan_help = sum(1 for c in bash_cmds if re.search(r"\bplan\b", c) and not re.search(r"\bplan\s+set\b", c))
 cargo_re = re.compile(r"\bcargo\s+(test|t)\b")
 cargo_tests = sum(1 for c in bash_cmds if cargo_re.search(c))
 
@@ -117,7 +121,7 @@ if err:
 fields = [
     f"requests={len(reqs)}", f"turns={turns}",
     "calls=" + ",".join(f"{k}:{v}" for k, v in sorted(names.items())),
-    f"plan_sets={plan_sets}", f"cargo_tests={cargo_tests}", f"fails={fails}",
+    f"plan_sets={plan_sets}", f"t4c={t4c_calls}", f"plan_other={plan_help}", f"cargo_tests={cargo_tests}", f"fails={fails}",
     f"first_fail={'-' if first_fail is None else first_fail}",
     f"edits_after_fail={edits_after}", f"tests_after_fail={tests_after}",
     f"acted_on_failure={acted}", f"last_test_ok={last_test_ok}",
