@@ -24,7 +24,7 @@ HTTP/1.1 only; a non-HTTP/1.x connection is reported and skipped.
   public repo, identifiers and all. The rule "fine unless committed" did not
   bind at the moment of action. Hence this banner, at the point of action.)
 """
-import sys, struct, json, gzip, zlib
+import sys, os, struct, json, gzip, zlib
 try:
     import brotli
 except ImportError:
@@ -84,6 +84,10 @@ def scrub_request_body(body):
       messages[]       -> user/assistant prompt text
     """
     if not isinstance(body, dict):
+        return body
+    if os.environ.get("NO_SCRUB"):
+        # Local analysis only (battery scorers read message text). Output
+        # produced this way carries prompt text and identifiers: never commit it.
         return body
     if isinstance(body.get("metadata"), dict) and "user_id" in body["metadata"]:
         body["metadata"]["user_id"] = "<redacted>"
