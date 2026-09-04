@@ -16,16 +16,29 @@ H=$(CDPATH= cd "$(dirname "$0")" && pwd)
 MU=${MU:-mu}
 RES=$P/results.log
 TOOLS="read,write,ls,edit,grep,glob,bash"
+# Provider/model: the vllm capture lane by default; set ROLE="<role> <rank>" to
+# resolve another target through `agent-role` (config, never a literal). A
+# non-vllm143 provider runs DIRECT (no proxy; scored from stderr) and, for
+# reasoning models, at --thinking low.
+if [ -n "${ROLE:-}" ]; then
+  set -- $(agent-role $ROLE) || exit 2
+  PROVIDER=$1; MODEL=$2; SUFFIX="-$(echo "$MODEL" | tr '/:.' '---')"; THINK="--thinking low"
+else
+  PROVIDER=vllm143; MODEL=qwen3.8-27b-nvfp4; SUFFIX=""; THINK=""
+fi
 mkdir -p "$P/runs" "$P/captures"
 for rep in ${REPS:-1 2 3}; do
   for arm in ${ARMS:-A B}; do
-    label=plan-ab-$arm-$rep
+    label=plan-ab-$arm$SUFFIX-$rep
     ws=$P/runs/$label; rm -rf "$ws"; mkdir -p "$ws"
     cp -R "$H/task/durparse/." "$ws/"
-    pkill -f "vllm-proxy.py 8435"; sleep 1
-    python3 "$H/../vllm-proxy.py" 8435 "$P/captures/$label.bin" > "$P/captures/proxy-$label.log" 2>&1 &
-    PROXY=$!
-    i=0; until curl -s -m 2 -o /dev/null http://127.0.0.1:8435/v1/models; do i=$((i+1)); [ $i -gt 30 ] && break; sleep 1; done
+    PROXY=""
+    if [ "$PROVIDER" = vllm143 ]; then
+      pkill -f "vllm-proxy.py 8435"; sleep 1
+      python3 "$H/../vllm-proxy.py" 8435 "$P/captures/$label.bin" > "$P/captures/proxy-$label.log" 2>&1 &
+      PROXY=$!
+      i=0; until curl -s -m 2 -o /dev/null http://127.0.0.1:8435/v1/models; do i=$((i+1)); [ $i -gt 30 ] && break; sleep 1; done
+    fi
     unset T4C_CONFIG T4C_SNAPSHOT; cfg="$P/testcfg"
     case "$arm" in
       A) extra="--append-system-prompt $H/sys-A.txt"; runpath="$H:$PATH" ;;
@@ -46,15 +59,22 @@ for rep in ${REPS:-1 2 3}; do
     esac
     start=$(date +%s)
     ( cd "$ws" && PATH="$runpath" XDG_CONFIG_HOME="$cfg" timeout "${RUN_TIMEOUT:-1200}" "$MU" ask --disable-mcp \
-        --provider vllm143 --model qwen3.8-27b-nvfp4 --tools "$TOOLS" --bash-yolo --max-turns 0 \
+        --provider "$PROVIDER" --model "$MODEL" $THINK --tools "$TOOLS" --bash-yolo --max-turns 0 \
         $extra --prompt-file "$H/prompt.txt" ) > "$ws.out" 2> "$ws.err"
     rc=$?
     wall=$(( $(date +%s) - start ))
-    kill $PROXY 2>/dev/null; wait $PROXY 2>/dev/null
+    [ -n "$PROXY" ] && { kill $PROXY 2>/dev/null; wait $PROXY 2>/dev/null; }
     ( cd "$ws" && cargo test --offline > "$ws.cargo.log" 2>&1 ); pass=$?
-    if diff -r "$H/task/durparse/tests" "$ws/tests" > /dev/null 2>&1; then tests=intact; else tests=MODIFIED; fi
-    NO_SCRUB=1 python3 "$H/../parse-wire.py" "$P/captures/$label.bin" "$P/captures/$label.jsonl" > /dev/null 2>&1
-    echo "RESULT $label rc=$rc wall=${wall}s cargo_test=$([ $pass -eq 0 ] && echo PASS || echo FAIL) tests=$tests $(python3 "$H/score.py" "$P/captures/$label.jsonl" "$ws.err")" | tee -a "$RES"
+    # tests/ must be semantically untouched; compare with all whitespace stripped so a
+    # `cargo fmt` re-wrap (seen with gpt-5.5) does not count as a modification.
+    if [ "$(cat "$H"/task/durparse/tests/*.rs | tr -d ' \t\n')" = "$(cat "$ws"/tests/*.rs 2>/dev/null | tr -d ' \t\n')" ]; then tests=intact; else tests=MODIFIED; fi
+    if [ -n "$PROXY" ]; then
+      NO_SCRUB=1 python3 "$H/../parse-wire.py" "$P/captures/$label.bin" "$P/captures/$label.jsonl" > /dev/null 2>&1
+      score=$(python3 "$H/score.py" "$P/captures/$label.jsonl" "$ws.err")
+    else
+      score=$(python3 "$H/score-stderr.py" "$ws.err")
+    fi
+    echo "RESULT $label rc=$rc wall=${wall}s cargo_test=$([ $pass -eq 0 ] && echo PASS || echo FAIL) tests=$tests $score" | tee -a "$RES"
   done
 done
 echo "BATTERY-DONE" >> "$RES"
