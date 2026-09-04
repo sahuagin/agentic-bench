@@ -136,3 +136,7 @@ Addendum (same day, arms T and P). The first six runs had a design hole: `[recal
 | P-3 | 241 s cap | 95 | 81 | 0 | FAIL, guard-refusal loop (76 identical `cargo test` calls) |
 
 Across all fifteen runs, zero calls to `discover`, `t4c` or `plan`, including the three with the production system context whose AGENTS.md says to call `discover` on first substantive use. The task never produces an unmet need: read, write, edit, bash and cargo are in hand from turn one, so "which tool" never arises, and a directive to plan does not make this model look for a plan tool. Pass rates under the 240 s cap are not comparable with the 1200 s runs. Two more mu-side findings: test binaries outlive the bash tool's timeout (mu-c1b3t), and the guard-refusal runaway reproduced in P-3 inside four minutes (mu-ucjhg).
+
+### GPT-5.5 (role-resolved, direct lane)
+
+Same arms P and T on the `coding` role's rank-1 target (`openai-codex gpt-5.5`, thinking low), no proxy, scored from stderr. P: 3/3 PASS in 61-70 s with 8-12 tool calls; T: 3/3 PASS in 38-61 s with 3-10 tool calls. Zero `discover`, `t4c` or `plan` calls in all six; under arm T's "write down a plan" sentence GPT printed a plan with `printf` and moved on. P-3's `tests=MODIFIED` is `cargo fmt` re-wrapping three asserts (whitespace only). Twenty-one runs across two models, no discovery call. Research memos and the synthesis are in `plan-ab/research/`.
