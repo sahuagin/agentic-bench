@@ -61,7 +61,12 @@ for the local scorers (`memory-hints-analyze.py`, `plan-ab/score.py`) — that o
 must never be committed.
 
 Lane: `qwen3.8-27b-nvfp4` on the GPU box's vLLM at :11435, through the proxy on
-127.0.0.1:8435 so every request is captured. The drivers need `mu` on PATH (or
+127.0.0.1:8435 so every request is captured. **The isolated `XDG_CONFIG_HOME` must
+carry `models.toml` as well as `config.toml`**: mu reads the model catalog from the
+config dir, and without it every custom model gets the 4096-token output floor and
+no per-model sampling (found 2026-09-08: every vllm battery since 2026-09-02 ran
+with `max_tokens=4096`, which is what truncated the big writes behind mu-gg2yf).
+Read one request off the wire and check `max_tokens` before trusting a run. The drivers need `mu` on PATH (or
 `MU=/path/to/mu`) and a `[[providers.endpoints]]` entry named `vllm143` pointing
 at the proxy; an isolated `XDG_CONFIG_HOME` per battery keeps the operator
 config untouched.
