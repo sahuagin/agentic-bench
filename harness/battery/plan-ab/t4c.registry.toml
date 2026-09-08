@@ -14,3 +14,18 @@ requires = []
 [capability.help]
 argv = ["plan", "--help"]
 ai = false
+
+[[capability]]
+path = "bash.web-probe"
+summary = "verify an HTML page or browser game in a REAL headless Chrome: `web-probe <file.html>` loads it and reports uncaught exceptions with locations, console errors, animation frames per second, and whether the page responds to a click and key presses; first line is `VERIFY web PASS|FAIL`. Use it to check that a canvas/WebGL page actually boots, renders and takes input instead of guessing from the source."
+keywords = [
+    "verify", "browser", "html", "game", "canvas", "webgl", "three.js", "render", "runtime",
+    "chrome", "headless", "playwright", "console error", "exception", "animation", "input",
+    "test the page", "does it run", "check it works", "smoke test",
+]
+priority = 5
+invoke = ["web-probe", "FILE.html"]
+requires = []
+[capability.help]
+argv = ["web-probe", "--help"]
+ai = false

@@ -61,7 +61,12 @@ for the local scorers (`memory-hints-analyze.py`, `plan-ab/score.py`) — that o
 must never be committed.
 
 Lane: `qwen3.8-27b-nvfp4` on the GPU box's vLLM at :11435, through the proxy on
-127.0.0.1:8435 so every request is captured. The drivers need `mu` on PATH (or
+127.0.0.1:8435 so every request is captured. **The isolated `XDG_CONFIG_HOME` must
+carry `models.toml` as well as `config.toml`**: mu reads the model catalog from the
+config dir, and without it every custom model gets the 4096-token output floor and
+no per-model sampling (found 2026-09-08: every vllm battery since 2026-09-02 ran
+with `max_tokens=4096`, which is what truncated the big writes behind mu-gg2yf).
+Read one request off the wire and check `max_tokens` before trusting a run. The drivers need `mu` on PATH (or
 `MU=/path/to/mu`) and a `[[providers.endpoints]]` entry named `vllm143` pointing
 at the proxy; an isolated `XDG_CONFIG_HOME` per battery keeps the operator
 config untouched.
@@ -136,3 +141,7 @@ Addendum (same day, arms T and P). The first six runs had a design hole: `[recal
 | P-3 | 241 s cap | 95 | 81 | 0 | FAIL, guard-refusal loop (76 identical `cargo test` calls) |
 
 Across all fifteen runs, zero calls to `discover`, `t4c` or `plan`, including the three with the production system context whose AGENTS.md says to call `discover` on first substantive use. The task never produces an unmet need: read, write, edit, bash and cargo are in hand from turn one, so "which tool" never arises, and a directive to plan does not make this model look for a plan tool. Pass rates under the 240 s cap are not comparable with the 1200 s runs. Two more mu-side findings: test binaries outlive the bash tool's timeout (mu-c1b3t), and the guard-refusal runaway reproduced in P-3 inside four minutes (mu-ucjhg).
+
+### GPT-5.5 (role-resolved, direct lane)
+
+Same arms P and T on the `coding` role's rank-1 target (`openai-codex gpt-5.5`, thinking low), no proxy, scored from stderr. P: 3/3 PASS in 61-70 s with 8-12 tool calls; T: 3/3 PASS in 38-61 s with 3-10 tool calls. Zero `discover`, `t4c` or `plan` calls in all six; under arm T's "write down a plan" sentence GPT printed a plan with `printf` and moved on. P-3's `tests=MODIFIED` is `cargo fmt` re-wrapping three asserts (whitespace only). Twenty-one runs across two models, no discovery call. Research memos and the synthesis are in `plan-ab/research/`.
