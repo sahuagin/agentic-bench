@@ -55,6 +55,12 @@ for rep in ${REPS:-1 2 3}; do
       P) extra=""; runpath="$H:$PATH"; cfg="$P/testcfg-P"
          export T4C_CONFIG="$H/t4c.registry.toml" T4C_SNAPSHOT="$P/t4c-snapshot.rkyv"
          PATH="$runpath" t4c discover > "$P/captures/t4c-discover-$label.log" 2>&1 ;;
+      # arm PB: arm P plus the discovery bootstrap as the system prompt. With
+      # recall ON the daemon sends no system prompt, so --append-system-prompt
+      # is purely additive here: files + kernel + the 116-token bootstrap.
+      PB) extra="--append-system-prompt $H/sys-B-bootstrap.txt"; runpath="$H:$PATH"; cfg="$P/testcfg-P"
+         export T4C_CONFIG="$H/t4c.registry.toml" T4C_SNAPSHOT="$P/t4c-snapshot.rkyv"
+         PATH="$runpath" t4c discover > "$P/captures/t4c-discover-$label.log" 2>&1 ;;
       *) extra=""; runpath="$PATH" ;;
     esac
     start=$(date +%s)
